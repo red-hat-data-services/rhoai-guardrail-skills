@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# =============================================================================
+# kube-linter Helm lint script — TEMPLATE (rhai-kube-linter onboarding)
+#
+# Scaffold from .agents/skills/rhai-kube-linter/templates/lint-helm.sh.tmpl,
+# specialize every __PLACEHOLDER_*__ value from the repository's actual facts,
+# and install at scripts/lint-helm.sh. Scaffold this script only when the
+# repository has Helm charts; repositories with Kustomize roots also get
+# scripts/lint-kustomize.sh. The Makefile `lint-manifests` target (or the
+# workflow, when there is no Makefile) invokes only the scripts the
+# repository needs. Refuses to run while unspecialized.
+#
+# Contract (do not weaken when specializing):
+# - EXTERNAL RENDERING: every chart is rendered by pinned Helm 4 (normal
+#   mode — `required`/`fail` template errors abort the render and fail the
+#   chart) into ONE scratch multi-document file per chart, and kube-linter
+#   lints that file only after a successful render. The render passes
+#   --include-crds: `helm install` always applies a chart's crds/
+#   directory, so the rendered profile includes chart CRDs (Helm 4
+#   defaults the flag to false, which would silently omit them).
+#   Chart roots/archives
+#   are never passed to kube-linter directly; there is no native-renderer
+#   fallback and no Helm 3 path. Use Helm 4 even when the consumer deploys
+#   with Helm 3 — document compatibility differences, never silently
+#   downgrade.
+# - Remote inputs (chart or values URLs) are fetched by the pinned renderer
+#   exactly as the documented invocation specifies; record them in the
+#   report's provenance.
+# - Fails on: selected-check violations, render failures, empty or
+#   comment-only renders, invalid resources, an empty chart list, zero
+#   enabled checks, missing or malformed reports, missing chart detail
+#   functions, and missing prerequisites. Never tune to green.
+# - Every chart renders even when an earlier one fails; failures aggregate.
+# - Raw artifacts (renders, JSON/plain reports, stderr) may contain Secret
+#   material: restrictive permissions, gitignored scratch only, never
+#   printed or uploaded — console output carries stage/status summaries and
+#   artifact paths only.
+#
+# Prerequisites: bash >= 3.2 (no associative arrays, namerefs, or newer-only
+# expansions are used), the Go toolchain — both tools run via pinned `go run`
+# and download modules on first use (network required; the Helm 4 module
+# requires Go >= 1.26) — and jq.
+# =============================================================================
+
+set -uo pipefail
+# No `-e`: each entry's status is checked explicitly and must not abort the
+# loop. Empty arrays use the `${arr[@]+"${arr[@]}"}` guard (bash 3.2 + set -u).
+
+# --- Tool pins -----------------------------------------------------------------
+# Version-qualified `go run`: the Go toolchain checksum-verifies module
+# downloads, and the pin here is the evidence of what ran. When changing a
+# pin, re-verify check names/flags against that release and record the change.
+KUBE_LINTER_VERSION="__PLACEHOLDER_KUBE_LINTER_PIN__"   # seed: v0.8.3 (golang.stackrox.io/kube-linter/cmd/kube-linter)
+HELM_VERSION="__PLACEHOLDER_HELM_PIN__"                 # seed: v4.3.2 (helm.sh/helm/v4/cmd/helm — REQUIRES Go >= 1.26)
+
+# --- Configuration ------------------------------------------------------------
+CONFIG="__PLACEHOLDER_CONFIG_PATH__"     # e.g. .kube-linter.yaml (relative to repo root)
+REPORT_DIR="__PLACEHOLDER_REPORT_DIR__"  # scratch reports, e.g. .kube-linter-reports — must be git-ignored (enforced fail-closed) or outside the repository
+
+# --- Chart profiles: name|chart (chart root or packaged .tgz, relative to repo root)
+# Names are unique, match [A-Za-z0-9._-], and name the scratch artifacts.
+#
+# EVERY chart requires a chart_<name>() function defined in the chart
+# functions section below, setting RELEASE, NAMESPACE, and the ordered ARGS
+# array from the repository's documented install invocation — bash reads
+# functions top to bottom, so definitions placed after the main loop at the
+# bottom do not exist yet when the charts render.
+#
+#   chart_my-chart() {
+#     RELEASE="my-release"        # helm template <release>
+#     NAMESPACE="my-namespace"    # --namespace <ns>
+#     ARGS=(-f "deploy/values.yaml" --set-string "image.tag=1.2.3")
+#   }
+#
+# ARGS is a plain indexed array: element order, flag types (--set-string vs
+# --set, -f), and embedded spaces are preserved verbatim; no eval, no
+# command-string splitting. Values come from the documented install
+# invocation in its documented order — never invented to tune findings away.
+# A generated lint-specific values file is scratch-only (place it in
+# REPORT_DIR), minimal, and documented; maintained consumer values files are
+# an approval-gated proposal, never written by this script.
+CHARTS=(
+  "__PLACEHOLDER_CHART_NAME|CHART__"
+)
+
+# --- Chart functions ------------------------------------------------------------
+# One chart_<name>() function per CHARTS entry, translated from the
+# repository's documented install invocation. Definitions must live HERE,
+# above the main loop: bash reads functions top to bottom, so a definition
+# placed after the loop does not exist yet when the charts render. A
+# function that fails makes the whole profile a failure — the chart is not
+# rendered with partial RELEASE/NAMESPACE/ARGS.
+chart___PLACEHOLDER_CHART_FUNCTION__() {
+  RELEASE="__PLACEHOLDER_RELEASE__"
+  NAMESPACE="__PLACEHOLDER_NAMESPACE__"
+  ARGS=(__PLACEHOLDER_ARGS__)
+}
+
+# --- Refuse to run unspecialized ------------------------------------------------
+# Anchored on an uppercase letter so the guard cannot match its own source.
+if grep -qE '__PLACEHOLDER_[A-Z]' "$0"; then
+  echo "ERROR: unspecialized template — fill every __PLACEHOLDER_*__ value in $0" >&2
+  exit 1
+fi
+
+# --- Environment -----------------------------------------------------------------
+# umask makes every artifact private on creation; each reset re-chmods so
+# loose permissions on existing artifacts are corrected (or fail closed).
+umask 077
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+mkdir -p "$REPORT_DIR" || { echo "ERROR: cannot create $REPORT_DIR" >&2; exit 1; }
+chmod 700 "$REPORT_DIR" 2>/dev/null || { echo "ERROR: cannot secure $REPORT_DIR permissions — failing closed" >&2; exit 1; }
+# The linter runs on the host: this script writes only into REPORT_DIR and
+# never modifies lint targets. REPORT_DIR is disposable gitignored scratch.
+REPORT_DIR="$(cd "$REPORT_DIR" && pwd)"
+# Raw artifacts may contain Secret material, so an in-repository REPORT_DIR
+# is allowed only when PROVABLY uncommittable: fail closed unless git
+# confirms it is ignored (a location outside the repository cannot be
+# committed; a repository without git cannot commit either).
+case "$REPORT_DIR" in
+  "$REPO_ROOT"/*)
+    if git rev-parse --git-dir >/dev/null 2>&1 && ! git check-ignore -q -- "$REPORT_DIR"; then
+      echo "ERROR: $REPORT_DIR is inside the repository but not git-ignored — raw reports may contain Secret material; gitignore it or point REPORT_DIR outside the repository" >&2
+      exit 1
+    fi
+    ;;
+esac
+# Artifacts live in a per-renderer subdirectory: names are unique only within
+# this script's own list, and this keeps the kustomize script's evidence
+# intact when a chart and a root share a name.
+REPORT_DIR="$REPORT_DIR/helm"
+mkdir -p "$REPORT_DIR" || { echo "ERROR: cannot create $REPORT_DIR" >&2; exit 1; }
+
+# --- Prerequisites -----------------------------------------------------------
+if ! command -v go >/dev/null 2>&1; then
+  echo "ERROR: go is required (pins: kube-linter ${KUBE_LINTER_VERSION}, helm ${HELM_VERSION})" >&2
+  exit 1
+fi
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required to validate lint reports" >&2; exit 1; }
+[ -f "$CONFIG" ] || { echo "ERROR: config not found: $CONFIG" >&2; exit 1; }
+if [ "${#CHARTS[@]}" -eq 0 ] || [ "${CHARTS[0]:-}" = "" ]; then
+  echo "ERROR: no charts configured — an empty target set is a failure, not a pass" >&2
+  exit 1
+fi
+
+# --- Helpers -------------------------------------------------------------------
+failures=0
+seen_names=" "
+
+die() { echo "ERROR: $1" >&2; }
+is_fn() { declare -F "$1" >/dev/null 2>&1; }
+
+# truncate in place (an empty file fails report validation, so a run that
+# writes nothing cannot pass) and force mode 600 on every reset
+reset_artifact() { : > "$1" 2>/dev/null && chmod 600 "$1" 2>/dev/null; }
+
+# at least one line that is not blank/comment/separator: empty or
+# comment-only renders are failures, not passes
+has_content() { grep -Eq '^[^[:space:]#-]' "$1" 2>/dev/null; }
+
+# report parses as JSON with >= 1 enabled check (a zero-check config exits
+# successfully WITHOUT writing a report — the classic false-green)
+checks_enabled() { jq -e '(.Checks | type == "array") and (.Checks | length > 0)' "$1" >/dev/null 2>&1; }
+
+# reset every artifact for one chart before any stage, so a failed or partial
+# run never leaves stale evidence behind
+reset_profile() {
+  local f
+  for f in "$1.rendered.yaml" "$1.json" "$1.txt" "$1.render.stderr" "$1.stderr"; do
+    reset_artifact "${REPORT_DIR}/$f" || return 1
+  done
+}
+
+# --- Lint ----------------------------------------------------------------------
+# run_lint <name> <rendered-file> — pinned kube-linter on one rendered file.
+# JSON plus human-readable plain reports (v0.8.3 has no `pretty` format).
+run_lint() {
+  local name="$1" target="$2"
+  local report="${REPORT_DIR}/${name}.json" plain="${REPORT_DIR}/${name}.txt" log="${REPORT_DIR}/${name}.stderr"
+  local status=0
+  # GOFLAGS/GOWORK are cleared per command via `env` so the version-qualified
+  # `go run` is standalone and insulated from the consumer's Go configuration.
+  env GOFLAGS= GOWORK=off go run "golang.stackrox.io/kube-linter/cmd/kube-linter@${KUBE_LINTER_VERSION}" lint \
+      --config "$CONFIG" \
+      --format json  --output "$report" \
+      --format plain --output "$plain" \
+      --fail-if-no-objects-found --fail-on-invalid-resource \
+      "$target" 2>"$log" || status=$?
+  # --fail-on-invalid-resource: deprecated in v0.8.3 (hidden from --help) but
+  # functional; do not remove without replacing this guard.
+  if [ "$status" -ne 0 ]; then
+    echo "FAIL: chart '$name' (lint exit ${status}) — see $log and $plain" >&2
+    failures=$((failures + 1))
+    return 0
+  fi
+  if [ ! -s "$report" ] || ! checks_enabled "$report"; then
+    die "chart '$name': report missing, malformed, or zero enabled checks"
+    failures=$((failures + 1))
+    return 0
+  fi
+  echo "PASS: chart '$name' (report: $report)"
+}
+
+# render_and_lint <name> <renderer command...> — run the renderer into the
+# chart's single multi-doc file, guard the outcome, then lint that file.
+# A failed or content-free render is never linted.
+render_and_lint() {
+  local name="$1"; shift
+  local rendered="${REPORT_DIR}/${name}.rendered.yaml"
+  local rlog="${REPORT_DIR}/${name}.render.stderr"
+  local status=0
+  "$@" >"$rendered" 2>"$rlog" || status=$?
+  if [ "$status" -ne 0 ]; then
+    die "chart '$name': render FAILED (exit ${status}) — not linted; see $rlog"
+    failures=$((failures + 1))
+    return 0
+  fi
+  if ! has_content "$rendered"; then
+    die "chart '$name': render produced empty or comment-only output — not linted"
+    failures=$((failures + 1))
+    return 0
+  fi
+  run_lint "$name" "$rendered"
+}
+
+# --- Render and lint every chart -------------------------------------------------
+for entry in "${CHARTS[@]}"; do
+  [ -n "$entry" ] || continue
+  name="${entry%%|*}"; target="${entry#*|}"
+  # Chart names become artifact filenames and function names: reject anything
+  # that could escape REPORT_DIR, collide, or break dispatch.
+  case "$name" in
+    ''|.*|*..*|*[!A-Za-z0-9._-]*)
+      die "invalid chart name '$name' (unique, [A-Za-z0-9._-], no leading dot, no '..')"
+      failures=$((failures + 1)); continue ;;
+  esac
+  case " $seen_names " in
+    *" $name "*)
+      die "duplicate chart name '$name' — names must be unique"
+      failures=$((failures + 1)); continue ;;
+  esac
+  seen_names=" $seen_names $name "
+  # Reset this chart's artifacts up front (fail-closed): failed and
+  # successful runs all start from empty evidence.
+  if ! reset_profile "$name"; then
+    die "chart '$name': cannot reset/secure scratch artifacts in $REPORT_DIR — failing closed"
+    failures=$((failures + 1)); continue
+  fi
+  # Absolute and remote (URL/OCI) targets are used verbatim; only relative
+  # local paths are anchored to the repo root.
+  case "$target" in
+    /*|*://*) ;;
+    *) target="$REPO_ROOT/$target" ;;
+  esac
+  RELEASE=""; NAMESPACE=""; ARGS=()
+  fn="chart_${name}"
+  if ! is_fn "$fn"; then
+    die "chart '$name': requires a $fn() function (RELEASE, NAMESPACE, ordered ARGS from the documented install invocation)"
+    failures=$((failures + 1)); continue
+  fi
+  if ! "$fn"; then
+    die "chart '$name': $fn() failed — not rendering with partial profile inputs"
+    failures=$((failures + 1)); continue
+  fi
+  if [ -z "$RELEASE" ] || [ -z "$NAMESPACE" ]; then
+    die "chart '$name': $fn() must set RELEASE and NAMESPACE (from the documented install invocation)"
+    failures=$((failures + 1)); continue
+  fi
+  # Remote chart targets (URL/OCI) are fetched by the pinned renderer; local
+  # targets must exist.
+  case "$target" in
+    *://*) ;;
+    *) if [ ! -e "$target" ]; then
+         die "chart '$name': chart target not found: $target"
+         failures=$((failures + 1)); continue
+       fi ;;
+  esac
+  render_and_lint "$name" \
+    env GOFLAGS= GOWORK=off go run "helm.sh/helm/v4/cmd/helm@${HELM_VERSION}" template \
+      "$RELEASE" "$target" --namespace "$NAMESPACE" --include-crds \
+      ${ARGS[@]+"${ARGS[@]}"}
+done
+
+echo
+if [ "$failures" -gt 0 ]; then
+  echo "kube-linter: FAILED (${failures} chart failure(s)). Reports in ${REPORT_DIR}/" >&2
+  exit 1
+fi
+echo "kube-linter: all charts passed. Reports in ${REPORT_DIR}/"

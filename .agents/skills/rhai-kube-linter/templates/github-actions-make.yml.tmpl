@@ -1,0 +1,49 @@
+# =============================================================================
+# kube-linter workflow (Makefile variant) — TEMPLATE (rhai-kube-linter onboarding)
+#
+# Use ONLY for repositories WITH a Makefile. The workflow calls the make
+# target; it must never invoke the lint scripts or `go run` directly.
+# For repositories without a Makefile, use github-actions-script.yml.tmpl
+# instead — never create a Makefile just for this skill.
+#
+# SPECIALIZE before approval/application:
+# - __PLACEHOLDER_DEFAULT_BRANCH__  the repository's default branch (detect,
+#   do not guess: `git symbolic-ref refs/remotes/origin/HEAD`)
+# - __PLACEHOLDER_GO_VERSION__  a Go version satisfying every pin in the
+#   repository's lint scripts (kube-linter v0.8.3 and kustomize v5.8.1 build
+#   with current Go releases; the Helm 4 pin v4.3.2 requires Go >= 1.26).
+#   The scripts run all tools via pinned `go run` and install the pinned
+#   Helm binary for Kustomize chart inflation from the same module pin, so
+#   the Go toolchain is required on every runner — no host helm install.
+# - Reuse an existing kube-linter workflow if the repository already has one.
+#
+# The make target (via the lint scripts) owns the pins, config, targets, and
+# flags — nothing is duplicated here.
+# =============================================================================
+name: kube-linter
+
+on:
+  pull_request:
+  push:
+    branches: [__PLACEHOLDER_DEFAULT_BRANCH__]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kube-linter:
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v7.0.1 (release 2026-07-20)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      # actions/setup-go v7.1.0 (release 2026-11-17) — required: the lint
+      # scripts run kube-linter, Kustomize, and Helm 4 renders via go run
+      # (the Helm 4 module needs Go >= 1.26)
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+        with:
+          go-version: '__PLACEHOLDER_GO_VERSION__'
+      - run: |
+          make lint-manifests

@@ -1,0 +1,36 @@
+# =============================================================================
+# kube-linter manifest lint target — TEMPLATE (rhai-kube-linter onboarding)
+#
+# HOW TO APPLY (append, never overwrite):
+# - APPEND this block to the repository Makefile. make uses the FIRST target
+#   in the file as the default goal, so appending below all existing content
+#   preserves the default goal.
+# - Do not modify or replace unrelated targets — in particular an existing
+#   `lint` target (often Go/Python lint) stays exactly as it is.
+# - If an equivalent manifest-lint target already exists, REUSE it: point it
+#   at the lint scripts below instead of adding a duplicate, and document
+#   the exact command in the onboarding report.
+# - The recipe lists only the lint scripts this repository actually needs:
+#   keep the lint-helm.sh line for Helm charts, the lint-kustomize.sh line
+#   for Kustomize roots, and delete the lines that do not apply. Statuses
+#   AGGREGATE: every listed script runs even if an earlier one fails (make
+#   would otherwise stop at the first failure and drop later evidence),
+#   and the target fails if any script failed. Within a script, every
+#   target also runs.
+# - Scripts are invoked through `bash` on purpose: the scaffolded scripts
+#   are committed with mode 100644, so a direct `./scripts/...` call would
+#   fail with Permission denied before linting starts.
+# - Both developers and GitHub Actions run `make lint-manifests`. The Actions
+#   workflow must never bypass this target with a direct script, `go run`, or
+#   container invocation.
+#
+# Repeat application is idempotent: if `lint-manifests` already exists in the
+# Makefile, do not append a second copy.
+# =============================================================================
+
+.PHONY: lint-manifests
+lint-manifests:
+	@status=0; \
+	bash ./scripts/lint-helm.sh || status=1; \
+	bash ./scripts/lint-kustomize.sh || status=1; \
+	exit $$status
