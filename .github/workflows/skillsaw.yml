@@ -1,0 +1,28 @@
+name: skillsaw
+
+on:
+  pull_request:
+    paths:
+      - ".agents/skills/**"
+      - "AGENTS.md"
+      - "Makefile"
+      - ".skillsaw.yaml"
+      - ".github/workflows/skillsaw.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".agents/skills/**"
+      - "AGENTS.md"
+      - "Makefile"
+      - ".skillsaw.yaml"
+      - ".github/workflows/skillsaw.yml"
+
+jobs:
+  skillsaw:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint skills and AGENTS.md
+        run: |
+          make lint
