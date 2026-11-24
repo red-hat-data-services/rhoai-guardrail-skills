@@ -1,0 +1,28 @@
+# Build artifacts
+bin/
+vendor/
+*.test
+cover.out
+covmeta*
+covcounters*
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# OS
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Kubeconfig (local dev)
+.kube/
+
+# Linter reports (kube-linter scratch dir)
+.kube-linter-reports/
+
+# Makefile overrides
+local.mk
+*.mktmp.*
