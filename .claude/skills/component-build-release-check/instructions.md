@@ -38,24 +38,18 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
      # ... commands
    ```
 
-4. **Checksum Verification for Downloaded Binaries** ⚠️ **NOT RECOMMENDED**
-   
-   **Status:** Attempted but removed due to CI failures with checksum mismatches.
-   
-   **Why it failed:**
-   - Checksums must be manually verified and updated
-   - GitHub Actions runners may have caching/proxy issues
-   - Difficult to debug checksum mismatches in CI
-   - Adds complexity and potential for breakage
-   
-   **Alternative approach:**
-   - Use official installation scripts when available
-   - Download from trusted sources (github.com releases)
-   - Rely on HTTPS for transport security
-   - Pin specific versions in URLs when possible
-   - **Primary supply chain protection comes from pinned GitHub Actions (SHA)**
-   
-   See `LEARNINGS.md` for detailed explanation.
+4. **Checksum Verification for Downloaded Binaries**
+
+   Every tool the workflow downloads and installs must be verified against a
+   committed digest before it runs. A version in a URL is a name, not an
+   integrity guarantee (CWE-494, CWE-829). This is the "Verify every downloaded
+   tool" rule in section 5; the `SIM_*_SHA256` pattern there shows the shape.
+
+   Prefer a SHA-pinned action (`astral-sh/setup-uv`, `actions/setup-go`) over a
+   `curl | sh` bootstrap — a pipe to a shell cannot be verified at all.
+
+   Pinned GitHub Actions protect the actions themselves, not tools the workflow
+   fetches separately; those need their own digest.
 
 5. **Improved Skip Conditions**
    ```yaml
@@ -801,15 +795,12 @@ name: PR Build Validation
 on:
   pull_request:
     branches: [main, v*, release-*]
-    paths:
-      - 'Dockerfile'
-      - 'Containerfile'
-      - 'src/**'
-      - 'packages/**'
-      - 'manifests/**'
-      - '.github/workflows/pr-build-validation.yml'
+  workflow_dispatch:
 
-# Allow skipping via [skip build-validation] in PR title or commit message
+# Skip with [skip build-validation] in the PR title or the skip-build-validation
+# label. Path relevance is evaluated in check-skip, not with a workflow-level
+# paths: filter — a required check that never starts stays pending and blocks
+# the merge.
 
 env:
   # Extracted from Dockerfile ARG defaults
@@ -817,13 +808,52 @@ env:
   IMAGE_NAME: ${{ github.repository }}:pr-${{ github.event.pull_request.number }}
 
 jobs:
+  check-skip:
+    name: Check Skip Condition
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should-skip: ${{ steps.decide.outputs.should-skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Evaluate skip condition
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # Keep this list in sync with the build inputs the Dockerfile consumes.
+          RELEVANT='^(Dockerfile|Containerfile|src/|packages/|manifests/|\.github/workflows/pr-build-validation\.yml)'
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "should-skip=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$PR_TITLE" == *"[skip build-validation]"* ]] || \
+               [[ ",${PR_LABELS}," == *",skip-build-validation,"* ]]; then
+            echo "should-skip=true" >> "$GITHUB_OUTPUT"
+          else
+            changed="$(git diff --no-renames --name-only "origin/${BASE_REF}...HEAD")" || exit 1
+            if grep -Eq "$RELEVANT" <<< "$changed"; then
+              echo "should-skip=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "should-skip=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   # Early validation checks (run in <30s before Docker build)
   validation-checks:
     name: Static Validation Checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: |
-      !contains(github.event.pull_request.title, '[skip build-validation]')
+    needs: check-skip
+    if: needs.check-skip.outputs.should-skip != 'true'
     
     steps:
       - name: Checkout code
@@ -847,17 +877,28 @@ jobs:
               ISSUES=$((ISSUES + 1))
             fi
             
-            # Check for missing resolved URLs
-            # IMPORTANT: Only check node_modules packages, not workspace packages
-            # Workspace packages (backend, frontend, packages/*) don't have resolved URLs
-            # If using jq: '.packages | to_entries[] | select(.key | startswith("node_modules/"))'
-            PKG_COUNT=$(grep -c '"version":' "$lockfile" || true)
-            RESOLVED_COUNT=$(grep -c '"resolved":' "$lockfile" || true)
-            
-            if [ $PKG_COUNT -gt 0 ] && [ $RESOLVED_COUNT -eq 0 ]; then
-              echo "⚠️  $lockfile is missing resolved URLs"
-              echo "   This may cause issues with hermetic builds"
-              ISSUES=$((ISSUES + 1))
+            # Check each node_modules entry individually. Aggregate counts hide
+            # a missing URL whenever any other entry has one, which turns the
+            # fault injection into a no-op.
+            # Workspace packages (backend, frontend, packages/*) and link:
+            # entries legitimately have no resolved URL, so only inspect
+            # node_modules entries that carry a version.
+            if command -v jq >/dev/null 2>&1; then
+              MISSING=$(jq -r '
+                .packages // {}
+                | to_entries[]
+                | select(.key | startswith("node_modules/"))
+                | select(.value.version != null)
+                | select(.value.link != true)
+                | select(.value.resolved == null)
+                | .key' "$lockfile")
+              if [ -n "$MISSING" ]; then
+                echo "❌ $lockfile has node_modules entries without a resolved URL:"
+                echo "$MISSING" | head -10
+                ISSUES=$((ISSUES + 1))
+              fi
+            else
+              echo "⚠️  WARNING: jq not installed, skipping per-entry resolved-URL check"
             fi
           done
           
@@ -1045,10 +1086,10 @@ jobs:
     name: Validate Build
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: validation-checks
+    needs: [check-skip, validation-checks]
     if: |
       always() &&
-      !contains(github.event.pull_request.title, '[skip build-validation]') &&
+      needs.check-skip.outputs.should-skip != 'true' &&
       needs.validation-checks.result == 'success'
 
     steps:
@@ -1134,45 +1175,60 @@ jobs:
           echo "✅ Health check passed"
       
       - name: Test Critical API Endpoints
+        env:
+          # Replace with a real PATCH route in this service.
+          PATCH_ENDPOINT: /api/config
         run: |
+          set -euo pipefail
           # Test endpoints that broke in fastify v4→v5 upgrade (PR #7387)
           echo "Testing critical API endpoint compatibility..."
           
           # Test 1: PATCH with application/merge-patch+json (broke in Fastify 5)
-          # Fastify 5 rejects this content-type with 415 FST_ERR_CTP_INVALID_MEDIA_TYPE
-          echo "Testing PATCH with merge-patch+json content-type..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X PATCH \
-            -H "Content-Type: application/merge-patch+json" \
-            -d '{"test": true}' \
-            http://localhost:8080/api/config 2>/dev/null || echo "000")
-          
-          # We expect 401/403 (auth required) or 404 (endpoint doesn't exist)
-          # We do NOT expect 415 (unsupported media type)
-          if [ "$HTTP_CODE" = "415" ]; then
-            echo "❌ PATCH with merge-patch+json returned 415 Unsupported Media Type"
-            echo "   This indicates Fastify 5 content-type regression (PR #6727)"
-            echo "   Breaks 28+ operations: notebooks, model serving, pipelines, RBAC"
-            exit 1
-          else
-            echo "✅ PATCH with merge-patch+json: $HTTP_CODE (not 415)"
-          fi
-          
-          # Test 2: PATCH with application/json-patch+json
-          echo "Testing PATCH with json-patch+json content-type..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X PATCH \
-            -H "Content-Type: application/json-patch+json" \
-            -d '[{"op": "add", "path": "/test", "value": true}]' \
-            http://localhost:8080/api/config 2>/dev/null || echo "000")
-          
-          if [ "$HTTP_CODE" = "415" ]; then
-            echo "❌ PATCH with json-patch+json returned 415 Unsupported Media Type"
-            echo "   This indicates Fastify 5 content-type regression (PR #6727)"
-            exit 1
-          else
-            echo "✅ PATCH with json-patch+json: $HTTP_CODE (not 415)"
-          fi
+          # Fastify 5 rejects this content-type with 415 FST_ERR_CTP_INVALID_MEDIA_TYPE.
+          # A 404, 405, or connection failure means the request never reached a
+          # PATCH handler, so it cannot tell us whether the content type was
+          # accepted. Point PATCH_ENDPOINT at a route that handles PATCH.
+          PATCH_ENDPOINT="${PATCH_ENDPOINT:?set PATCH_ENDPOINT to an endpoint with a PATCH handler}"
+
+          assert_patch_content_type() {
+            local content_type="$1" data="$2" code
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X PATCH \
+              -H "Content-Type: $content_type" \
+              -d "$data" \
+              "http://localhost:8080${PATCH_ENDPOINT}" 2>/dev/null || echo "000")
+
+            case "$code" in
+              000)
+                echo "❌ PATCH $content_type could not reach the service"
+                return 1
+                ;;
+              404|405)
+                echo "❌ PATCH $content_type returned $code: $PATCH_ENDPOINT does not handle PATCH"
+                echo "   Point PATCH_ENDPOINT at a real PATCH route, or the test proves nothing"
+                return 1
+                ;;
+              415)
+                echo "❌ PATCH $content_type returned 415 Unsupported Media Type"
+                echo "   This indicates Fastify 5 content-type regression (PR #6727)"
+                echo "   Breaks 28+ operations: notebooks, model serving, pipelines, RBAC"
+                return 1
+                ;;
+              2*|400|401|403|422)
+                echo "✅ PATCH $content_type reached the handler: $code"
+                return 0
+                ;;
+              *)
+                echo "❌ PATCH $content_type returned unexpected $code"
+                return 1
+                ;;
+            esac
+          }
+
+          assert_patch_content_type \
+            "application/merge-patch+json" '{"test": true}'
+          assert_patch_content_type \
+            "application/json-patch+json" '[{"op": "add", "path": "/test", "value": true}]'
           
           echo ""
           echo "✅ Critical API endpoint validation passed"
@@ -1314,17 +1370,18 @@ hermetic_go_preflight() (
   trap 'chmod -R u+w "$workdir" 2>/dev/null || true; rm -rf "$workdir"' EXIT
   modcache="$workdir/gomodcache"
 
-  # GOTOOLCHAIN is explicit in BOTH phases. `go.mod` may request a newer
-  # toolchain than the runner ships; the network phase then downloads it into
-  # GOMODCACHE/golang.org/toolchain, and the offline phase must find that same
-  # copy instead of trying to fetch it again (which GOPROXY=off would reject).
+  # Install the builder image's Go version before calling this function
+  # (`./scripts/validate-build.sh go-version` reads the golang/go-toolset FROM
+  # tag). GOTOOLCHAIN=local is explicit in BOTH phases so a go.mod that
+  # requires a newer toolchain fails here in the network phase, instead of
+  # downloading a toolchain the Konflux builder does not have and passing.
   # Setting it explicitly also stops an inherited GOTOOLCHAIN from changing
   # behaviour between local runs and CI.
-  GOTOOLCHAIN=auto GOMODCACHE="$modcache" GOFLAGS="-mod=readonly" \
+  GOTOOLCHAIN=local GOMODCACHE="$modcache" GOFLAGS="-mod=readonly" \
     go mod download
 
   # Offline phase: GOPROXY=off turns a missing module into a hard failure
-  GOTOOLCHAIN=auto GOMODCACHE="$modcache" GOPROXY=off GOFLAGS="-mod=readonly" \
+  GOTOOLCHAIN=local GOMODCACHE="$modcache" GOPROXY=off GOFLAGS="-mod=readonly" \
     CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o "$workdir/app" .
 )
 
@@ -1353,27 +1410,40 @@ hermetic_python_preflight() (
   echo "resolved $(grep -c '==' "$workdir/lock.txt") pinned distributions"
 
   # The offline proof is only meaningful where the target platform can be
-  # installed. On a macOS runner the cache is keyed for darwin, so skip it
-  # rather than report a pass that proves nothing.
-  if [ "$(uname -s)" != "Linux" ]; then
-    echo "skipping offline install on $(uname -s); resolution check only"
+  # installed. On macOS, or on a runner whose architecture differs from the
+  # target, skip it rather than report a pass that proves nothing.
+  target_arch="${python_platform%%-*}"
+  if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "$target_arch" ]; then
+    echo "skipping offline install on $(uname -s)/$(uname -m) for target ${python_platform}; resolution check only"
     return 0
   fi
 
   # Network phase 2: populate an ISOLATED cache, then delete the venv so the
   # next install cannot reuse installed packages and must come from the cache.
+  # Both installs resolve for the target platform, not the runner's.
   export UV_CACHE_DIR="$workdir/uv-cache"
   uv venv "$workdir/v1" --python "$python_version" --quiet
   uv pip install --python "$workdir/v1/bin/python" \
+    --python-platform "$python_platform" \
     --requirement "$requirements_file" --quiet
 
   # Offline phase: --offline forbids all network, so a missing prefetch fails here
   rm -rf "$workdir/v1"
   uv venv "$workdir/v2" --python "$python_version" --quiet
   uv pip install --offline --python "$workdir/v2/bin/python" \
+    --python-platform "$python_platform" \
     --requirement "$requirements_file" --quiet
 )
 ```
+
+**What this proves, and what it does not.** The cache is warmed from
+`REQUIREMENTS_FILE`, so the offline phase proves that file installs with no
+network — it does not prove that Konflux's `prefetch-input` contains every one
+of those distributions. When the PipelineRun sets `prefetch-input` (Step 1.5b),
+warm the cache from the resolved prefetch inputs instead, and add a
+fault-injection case where a distribution in the requirements file is absent
+from the prefetch set: the offline phase must fail. Until that check exists, do
+not claim prefetch coverage in the PR description.
 
 Set `REQUIREMENTS_FILE` per invocation rather than editing the function, so one
 job can cover several components:
@@ -1386,6 +1456,11 @@ done
 
 **Rules:**
 
+- **Install the builder's Go version, not the version in `go.mod`.** Resolve the
+  `golang:`/`go-toolset:` tag from the Containerfile and install that version.
+  `go-version-file: go.mod` installs whatever the module asks for, which is the
+  mismatch this check exists to catch. With `GOTOOLCHAIN=local`, a `go.mod` that
+  requires a newer Go fails in the network phase.
 - Build the same package target with the same flags as the Dockerfile (`CGO_ENABLED`, `GOOS`, `-tags`, entry package). Building a different target does not prove the shipped binary links.
 - Set `GOOS=linux` even on macOS so local runs catch platform-specific files.
 - Use `GOPROXY=off` instead of `--network=none` inside a build that must also populate its cache; the npm limitation documented in `LEARNINGS.md` applies to any package manager that resolves during the build.
@@ -1898,17 +1973,25 @@ This catches RBAC gaps, scheme/registration panics, and broken render paths that
        # large upstream pull happens here. The dashboard pod may sit in ErrImagePull on
        # the local-only tag — benign; we assert only on operator reconcile evidence below.
        kubectl apply -f .github/pr-build-simulation/dashboard-cr.yaml
+       reconciled=false
        for i in $(seq 1 30); do
          gen=$(kubectl get dashboard default -o jsonpath='{.metadata.generation}' 2>/dev/null || echo "")
          obs=$(kubectl get dashboard default -o jsonpath='{.status.observedGeneration}' 2>/dev/null || echo "")
          fin=$(kubectl get dashboard default -o jsonpath='{.metadata.finalizers}' 2>/dev/null || echo "")
          if [ -n "$obs" ] && [ "$obs" = "$gen" ] && [ -n "$fin" ]; then
            echo "✅ Reconciled: observedGeneration=$obs, finalizer=$fin"
+           reconciled=true
            break
          fi
          echo "waiting for reconcile... ($i/30) gen=$gen obs=$obs"
          sleep 5
        done
+       # Exhausting the loop is a failure: an operator that never reconciles but
+       # also never restarts would otherwise pass this step.
+       [ "$reconciled" = "true" ] || {
+         echo "❌ no reconcile evidence after 30 attempts (gen=$gen obs=$obs finalizers=$fin)"
+         exit 1
+       }
        restarts=$(kubectl get pods -n opendatahub -l app.kubernetes.io/name=dashboard-operator \
          -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')
        [ "$restarts" = "0" ] || { echo "❌ operator restarted $restarts time(s)"; exit 1; }

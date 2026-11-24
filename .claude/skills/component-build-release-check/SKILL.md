@@ -91,8 +91,9 @@ Validation`.
 - ✅ **Hermetic build preflight** - Proves the build survives with no network
   - Node: populate a pnpm store, then install from it
   - Go: populate an isolated module cache, then compile with `GOPROXY=off`
-  - Python: build a local wheelhouse, then resolve with `pip --no-index`
-  - Catches missing prefetch inputs in minutes instead of in Konflux
+  - Python: populate an isolated uv cache, then install with `--offline`
+  - Fails on a dependency missing from the warmed cache; proving coverage of
+    Konflux's `prefetch-input` needs that input set passed to the check
 
 #### Docker Build Validation
 - ✅ Builds Docker image with production build mode (RHOAI, etc.)

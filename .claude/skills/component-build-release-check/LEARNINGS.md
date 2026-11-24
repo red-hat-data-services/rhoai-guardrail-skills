@@ -757,13 +757,17 @@ cleanup trap must chmod first:
 trap 'chmod -R u+w "$workdir" 2>/dev/null || true; rm -rf "$workdir"' EXIT
 ```
 
-### 3. `GOTOOLCHAIN=auto` downloads the toolchain into `GOMODCACHE`
+### 3. Pin the builder's Go version and set `GOTOOLCHAIN=local`
 
-When `go.mod` requires a newer Go than the host has, `go mod download` fetches
-the toolchain into the isolated module cache. That is desirable: the offline
-phase then succeeds only because the toolchain was prefetched, which mirrors the
-hermetic build. Keep `GOTOOLCHAIN=auto` and populate the cache before going
-offline.
+With `GOTOOLCHAIN=auto`, `go mod download` fetches whatever toolchain `go.mod`
+asks for into the isolated module cache. The offline phase then passes even when
+the module requires a newer Go than the Konflux builder image ships — the exact
+mismatch the preflight exists to catch.
+
+Install the builder's Go version first (`./scripts/validate-build.sh go-version`
+reads the `golang:`/`go-toolset:` FROM tag) and run both phases with
+`GOTOOLCHAIN=local`. A `go.mod` that requires a newer toolchain then fails in
+the network phase, before the offline phase can mask it.
 
 ### 4. PEP 668 blocks `pip install --dry-run`
 
@@ -946,7 +950,7 @@ defaults to `All`, so it is not tier-skipped. It never runs on Kind because
 
 Enabling it is two edits, not a new test suite:
 
-1. `Makefile` → `E2E_TEST_COMPONENT="kserve,aihub"`
+1. `Makefile` → `E2E_TEST_COMPONENT="kserve aihub"`
 2. `.github/workflows/test-kind-odh-e2e.yaml` → add the component's paths to
    `paths:` (`internal/controller/modules/aihub/**`,
    `api/components/v1alpha1/aihub_types.go`, `tests/e2e/aihub_test.go`,
