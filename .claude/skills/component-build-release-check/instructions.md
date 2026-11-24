@@ -830,8 +830,9 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          # Keep this list in sync with the build inputs the Dockerfile consumes.
-          RELEVANT='^(Dockerfile|Containerfile|src/|packages/|manifests/|\.github/workflows/pr-build-validation\.yml)'
+          # Dependency and build inputs, not just the Dockerfile: a lockfile
+          # change is the most likely way to break a hermetic build.
+          RELEVANT='(^|/)(Dockerfile|Containerfile)(\..*)?$|(^|/)\.dockerignore$|(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|go\.mod|go\.sum)$|(^|/)requirements[^/]*\.txt$|(^|/)(src|packages|manifests)/|^\.github/workflows/pr-build-validation\.yml$'
 
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "should-skip=false" >> "$GITHUB_OUTPUT"
