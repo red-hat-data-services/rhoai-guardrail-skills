@@ -353,7 +353,7 @@ jobs:
 **Pattern:**
 
 ```yaml
-if: "!contains(github.event.pull_request.title, '[skip konflux-sim]') && !contains(github.event.pull_request.labels.*.name, 'skip-konflux-sim')"
+if: "!contains(github.event.pull_request.title, '[skip build-validation]') && !contains(github.event.pull_request.labels.*.name, 'skip-build-validation')"
 ```
 
 **Applied to all main jobs**
@@ -813,7 +813,7 @@ every job cannot drift, and include `workflow_dispatch` as an explicit override.
 A `summary` job with `if: always()` that fails unless every dependency is
 `success` or `skipped` gives branch protection one stable check name. GitHub
 treats a skipped required check as passing, so an intentional
-`[skip konflux-sim]` run does not block merge.
+`[skip build-validation]` run does not block merge.
 
 ## Issue: Detecting the operator consumer, not the operator repo
 

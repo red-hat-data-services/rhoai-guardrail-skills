@@ -59,7 +59,7 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
 
 5. **Improved Skip Conditions**
    ```yaml
-   if: "!contains(github.event.pull_request.title, '[skip konflux-sim]') && !contains(github.event.pull_request.labels.*.name, 'skip-konflux-sim')"
+   if: "!contains(github.event.pull_request.title, '[skip build-validation]') && !contains(github.event.pull_request.labels.*.name, 'skip-build-validation')"
    ```
 
 6. **Optional Tool Dependencies with Fallback**
@@ -158,8 +158,8 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
                 echo "should-skip=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
-              if [[ "$PR_TITLE" == *"[skip konflux-sim]"* ]] || \
-                 [[ ",${PR_LABELS}," == *",skip-konflux-sim,"* ]]; then
+              if [[ "$PR_TITLE" == *"[skip build-validation]"* ]] || \
+                 [[ ",${PR_LABELS}," == *",skip-build-validation,"* ]]; then
                 echo "should-skip=true" >> "$GITHUB_OUTPUT"
               else
                 echo "should-skip=false" >> "$GITHUB_OUTPUT"
@@ -809,7 +809,7 @@ on:
       - 'manifests/**'
       - '.github/workflows/pr-build-validation.yml'
 
-# Allow skipping via [skip konflux-sim] in PR title or commit message
+# Allow skipping via [skip build-validation] in PR title or commit message
 
 env:
   # Extracted from Dockerfile ARG defaults
@@ -823,7 +823,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: |
-      !contains(github.event.pull_request.title, '[skip konflux-sim]')
+      !contains(github.event.pull_request.title, '[skip build-validation]')
     
     steps:
       - name: Checkout code
@@ -1048,7 +1048,7 @@ jobs:
     needs: validation-checks
     if: |
       always() &&
-      !contains(github.event.pull_request.title, '[skip konflux-sim]') &&
+      !contains(github.event.pull_request.title, '[skip build-validation]') &&
       needs.validation-checks.result == 'success'
 
     steps:
@@ -1640,7 +1640,7 @@ This is **much stronger validation** than just checking YAML syntax.
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    if: "!contains(github.event.pull_request.title, '[skip konflux-sim]') && !contains(github.event.pull_request.labels.*.name, 'skip-konflux-sim')"
+    if: "!contains(github.event.pull_request.title, '[skip build-validation]') && !contains(github.event.pull_request.labels.*.name, 'skip-build-validation')"
 
     steps:
       - name: Checkout code

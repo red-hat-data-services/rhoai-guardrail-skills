@@ -221,7 +221,7 @@ Kind component filter excludes them. Emit the diff; do not reimplement them.
 - **Comprehensive**: Catches most common build failures before merge
 - **Automated**: No manual intervention needed
 - **Documented**: Clear failure messages and logs
-- **Skippable**: Add `[skip konflux-sim]` to PR title to skip
+- **Skippable**: Add `[skip build-validation]` to PR title to skip
 
 ## Artifact Consumption Detection
 
