@@ -792,7 +792,8 @@ Most components will be simpler (1-2 containers). Adjust resource patching accor
 Every `uses:` in the generated workflow must be a commit SHA with the version in
 a trailing comment (section 5). The template below carries that pin for
 `actions/checkout`; re-resolve the SHA when you bump the version, and pin any
-action you add the same way.
+action you add the same way. If the repository already pins this action
+somewhere, reuse that exact ref instead of the version in the template.
 
 ```yaml
 name: PR Build Validation
@@ -2761,7 +2762,7 @@ not proof; the message is:
 ❌ rendered image 'quay.io/opendatahub/model-registry:latest' != PR image 'quay.io/...@sha256:...'
 ```
 
-Three rules keep this honest:
+Four rules keep this honest:
 
 - **Revert the injection.** It must not be part of the PR. If the check passes
   after the revert, that is the positive path working. If it passed *with* the
@@ -2771,6 +2772,13 @@ Three rules keep this honest:
 - **Do not upgrade a red-test into a claim about coverage.** One injection
   proves that assertion fires for that failure mode, not that the stage covers
   the whole class.
+- **Give the check a non-empty input before trusting a green run.** A validator
+  that treats an empty file as "nothing to verify" passes on the exact
+  corruption it exists to catch: `go mod verify` reports "all modules verified"
+  against an emptied `go.sum`, and `compgen -G "pkg/"` succeeds on a missing
+  directory because it echoes the pattern back. Assert the input exists and is
+  non-empty first, test plain paths with `[ -e ]`, and keep `compgen -G` for
+  real globs only.
 
 **Put the result in the PR description.** Reviewers need to see, per ticket,
 that the gap is closed rather than asserted. This table is the deliverable:
