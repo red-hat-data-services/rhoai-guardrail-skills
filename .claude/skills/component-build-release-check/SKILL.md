@@ -34,8 +34,8 @@ It starts from evidence, not a checklist: before generating anything it mines
 the component's historical Jira breakages, classifies each one as catchable
 here, catchable only in the consuming operator, or not catchable at all, and
 then **fault-injects every check** to show it actually goes red on that failure.
-The PR description carries both tables — what the simulator now catches, and
-what it still cannot.
+The PR description carries both tables — what these checks catch, and what they
+still cannot.
 
 That distinction is the whole point. The model-registry onboarding looked
 complete while the `DataScienceCluster` was never Ready: `ModelRegistryReady`
@@ -88,7 +88,9 @@ Validation`.
   - Verifies esbuild removal from node_modules
   - Ensures Go binaries use -tags strictfipsruntime
   - Warns about FIPS violations that block product release
-- ✅ **Hermetic build preflight** - Proves the build survives with no network
+- ✅ **Hermetic build preflight** - Proves the build survives with no network,
+  only when the resolved PipelineRun asks for it (`hermetic: true` or a
+  `prefetch-input` set); skip it for non-hermetic builds
   - Node: populate a pnpm store, then install from it
   - Go: populate an isolated module cache, then compile with `GOPROXY=off`
   - Python: populate an isolated uv cache, then install with `--offline`

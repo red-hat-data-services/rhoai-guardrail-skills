@@ -789,6 +789,11 @@ Most components will be simpler (1-2 containers). Adjust resource patching accor
 
 #### Step 2.1: Create Base Workflow Template
 
+Every `uses:` in the generated workflow must be a commit SHA with the version in
+a trailing comment (section 5). The template below carries that pin for
+`actions/checkout`; re-resolve the SHA when you bump the version, and pin any
+action you add the same way.
+
 ```yaml
 name: PR Build Validation
 
@@ -816,7 +821,7 @@ jobs:
     outputs:
       should-skip: ${{ steps.decide.outputs.should-skip }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -858,7 +863,7 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
       
       - name: Validate NPM Lockfiles
         run: |
@@ -1095,7 +1100,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
 
       # Docker build
       - name: Build Docker Image
@@ -2111,7 +2116,7 @@ unrelated to the PR, and a pin lets you bump it deliberately.
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
 
       # Kustomize is pre-installed on ubuntu-latest runners
       # No installation needed
