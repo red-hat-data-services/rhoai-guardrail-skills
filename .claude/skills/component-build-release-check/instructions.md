@@ -226,6 +226,15 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
     fi
     ```
 
+    Build `$RELEVANT` from the resolved build inputs, never from guessed
+    source-directory names. Take `path-context` from Step 1.5b — everything the
+    image compiles sits under it — match `.tekton/` so a PipelineRun edit
+    cannot change what Konflux builds without this gate noticing, and keep the
+    Dockerfile, `.dockerignore` and lockfile patterns. A list that names `src/`
+    or `packages/` skips validation for every real change in a repo whose code
+    lives in `cmd/` or `internal/`. If `path-context` is `.` the build context
+    is the whole repo, so set `RELEVANT='^'` and let every path run the checks.
+
 ## Process
 
 ### Phase 1: Repository Analysis
@@ -836,9 +845,13 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          # Dependency and build inputs, not just the Dockerfile: a lockfile
-          # change is the most likely way to break a hermetic build.
-          RELEVANT='(^|/)(Dockerfile|Containerfile)(\..*)?$|(^|/)\.dockerignore$|(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|go\.mod|go\.sum)$|(^|/)requirements[^/]*\.txt$|(^|/)(src|packages|manifests)/|^\.github/workflows/pr-build-validation\.yml$'
+          # Replace <path-context> with the value from the PipelineRun
+          # (Step 1.5b), dropping a leading './' because diff paths never carry
+          # one. Everything the image compiles lives under it, so a source-only
+          # change cannot slip through. Lockfiles are matched explicitly
+          # because they change the dependency graph without touching source.
+          # When path-context is '.', set RELEVANT='^' instead.
+          RELEVANT='^(<path-context>/|\.tekton/|(^|/)(Dockerfile|Containerfile)(\..*)?$|(^|/)\.dockerignore$|(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|go\.mod|go\.sum)$|(^|/)requirements[^/]*\.txt$|^\.github/workflows/pr-build-validation\.yml$)'
 
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "should-skip=false" >> "$GITHUB_OUTPUT"
@@ -894,7 +907,7 @@ jobs:
               MISSING=$(jq -r '
                 .packages // {}
                 | to_entries[]
-                | select(.key | startswith("node_modules/"))
+                | select(.key | test("(^|/)node_modules/"))
                 | select(.value.version != null)
                 | select(.value.link != true)
                 | select(.value.resolved == null)
@@ -1377,9 +1390,9 @@ hermetic_go_preflight() (
   trap 'chmod -R u+w "$workdir" 2>/dev/null || true; rm -rf "$workdir"' EXIT
   modcache="$workdir/gomodcache"
 
-  # Install the builder image's Go version before calling this function
-  # (`./scripts/validate-build.sh go-version` reads the golang/go-toolset FROM
-  # tag). GOTOOLCHAIN=local is explicit in BOTH phases so a go.mod that
+  # Install the builder image's Go version before calling this function: read
+  # the version from the golang/go-toolset FROM tag in the Dockerfile.
+  # GOTOOLCHAIN=local is explicit in BOTH phases so a go.mod that
   # requires a newer toolchain fails here in the network phase, instead of
   # downloading a toolchain the Konflux builder does not have and passing.
   # Setting it explicitly also stops an inherited GOTOOLCHAIN from changing
