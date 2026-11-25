@@ -33,5 +33,7 @@ and is expected to be edited in place after it lands.
 
 `component-build-release-check` was moved from
 `antowaddle/Red-Hat-Quality-Tiger-Team` at commit `4274243`, where it lived at
-`.claude/skills/konflux-build-simulator/`. The content is unchanged apart from
-the rename and a tool-agnostic skip token.
+`.claude/skills/konflux-build-simulator/`, and then synced with the learnings
+merged upstream in `antowaddle/Red-Hat-Quality-Tiger-Team#41`. Apart from the
+rename, the tool-agnostic skip token and the review fixes in this PR, the
+checks are unchanged.
