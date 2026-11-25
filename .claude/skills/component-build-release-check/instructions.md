@@ -232,8 +232,12 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
     cannot change what Konflux builds without this gate noticing, and keep the
     Dockerfile, `.dockerignore` and lockfile patterns. A list that names `src/`
     or `packages/` skips validation for every real change in a repo whose code
-    lives in `cmd/` or `internal/`. If `path-context` is `.` the build context
-    is the whole repo, so set `RELEVANT='^'` and let every path run the checks.
+    lives in `cmd/` or `internal/`. Match `path-context` as a fixed string, not
+    as part of the regular expression: a context such as `services/foo+bar` or
+    `a(b` is a different pattern, and an unbalanced one makes `grep -E` fail —
+    which the `if` reads as "no relevant change" and skips validation with no
+    signal. If `path-context` is `.` the build context is the whole repo, so
+    keep `CONTEXT='.'` and let the whole-repo branch below match every path.
 
 ## Process
 
@@ -854,13 +858,15 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          # Replace <path-context> with the value from the PipelineRun
-          # (Step 1.5b), dropping a leading './' because diff paths never carry
-          # one. Everything the image compiles lives under it, so a source-only
-          # change cannot slip through. Lockfiles are matched explicitly
-          # because they change the dependency graph without touching source.
-          # When path-context is '.', set RELEVANT='^' instead.
-          RELEVANT='^(<path-context>/|\.tekton/|(^|/)(Dockerfile|Containerfile)(\..*)?$|(^|/)\.dockerignore$|(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|go\.mod|go\.sum)$|(^|/)requirements[^/]*\.txt$|^\.github/workflows/pr-build-validation\.yml$)'
+          # Set CONTEXT to the PipelineRun's path-context (Step 1.5b), dropping
+          # a leading './' because diff paths never carry one; keep '.' when the
+          # build context is the whole repo. It is compared as a fixed string
+          # below, never spliced into a regex: metacharacters in a directory
+          # name would otherwise stop it matching its own files.
+          CONTEXT='<path-context>'
+          # Lockfiles are matched explicitly because they change the dependency
+          # graph without touching source.
+          RELEVANT='^\.tekton/|(^|/)(Dockerfile|Containerfile)(\..*)?$|(^|/)\.dockerignore$|(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|go\.mod|go\.sum)$|(^|/)requirements[^/]*\.txt$|^\.github/workflows/pr-build-validation\.yml$'
 
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "should-skip=false" >> "$GITHUB_OUTPUT"
@@ -875,7 +881,9 @@ jobs:
             changed_file=$(mktemp)
             trap 'rm -f "$changed_file"' EXIT
             git diff --no-renames --name-only -z "origin/${BASE_REF}...HEAD" > "$changed_file" || exit 1
-            if grep -Ezq "$RELEVANT" "$changed_file"; then
+            if [ "$CONTEXT" = "." ] ||
+               grep -zFq "${CONTEXT}/" "$changed_file" ||
+               grep -Ezq "$RELEVANT" "$changed_file"; then
               echo "should-skip=false" >> "$GITHUB_OUTPUT"
             else
               echo "should-skip=true" >> "$GITHUB_OUTPUT"
@@ -1433,11 +1441,21 @@ hermetic_python_preflight() (
   # macosx_arm64 says nothing about the manylinux build Konflux runs.
   local python_platform="${PYTHON_PLATFORM:-x86_64-manylinux_2_34}"
 
+  # --no-config ignores uv.toml and [tool.uv] in the checkout; the unset covers
+  # the other half, inherited UV_* settings that would swap the index, add
+  # constraints or change wheel selection. Without both, the preflight can
+  # resolve a different graph from the one the job declares and still pass.
+  # UV_CACHE_DIR is set deliberately below and is not cleared here.
+  unset UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_DEFAULT_INDEX \
+    UV_CONSTRAINT UV_OVERRIDE UV_RESOLUTION UV_PRERELEASE UV_FIND_LINKS \
+    UV_NO_BINARY UV_BINARY
+
   # Network phase 1: resolve the full closure. Use uv, not pip. pip's
   # backtracking gives up on real dependency graphs ("resolution-too-deep")
   # and falls back to building sdists that need system toolchains (psycopg-c
   # wants pg_config). uv resolves the same graph the image installs from.
   uv pip compile "$requirements_file" \
+    --no-config \
     --python-version "$python_version" \
     --python-platform "$python_platform" \
     --quiet \
@@ -1459,6 +1477,7 @@ hermetic_python_preflight() (
   export UV_CACHE_DIR="$workdir/uv-cache"
   uv venv "$workdir/v1" --python "$python_version" --quiet
   uv pip install --python "$workdir/v1/bin/python" \
+    --no-config \
     --python-platform "$python_platform" \
     --requirement "$requirements_file" --quiet
 
@@ -1466,6 +1485,7 @@ hermetic_python_preflight() (
   rm -rf "$workdir/v1"
   uv venv "$workdir/v2" --python "$python_version" --quiet
   uv pip install --offline --python "$workdir/v2/bin/python" \
+    --no-config \
     --python-platform "$python_platform" \
     --requirement "$requirements_file" --quiet
 )
