@@ -27,8 +27,24 @@ This skill analyzes a repository and generates GitHub Actions workflows that val
 
 **Read [`instructions.md`](instructions.md) before generating anything.** The
 procedure, thresholds, fault-injection requirements and environment traps live
-there; this file is the summary. Then read [`LEARNINGS.md`](LEARNINGS.md): it
-records why each check exists, and most checks make no sense without it.
+there; this file is the summary. Then read the [`LEARNINGS.md`](LEARNINGS.md)
+entries that govern the checks you are generating — it records why each check
+exists, and most checks make no sense without it. Start from this index instead
+of reading all 2,000 lines:
+
+| Generating | Read |
+|---|---|
+| Skip gate, summary job, required status checks | *A green check that never ran is worse than no check*; *Workflow correctness lessons from the model-registry onboarding review* |
+| Hermetic Go/Python preflight | *`pip` cannot prove a Python hermetic build, `uv` can*; *Porting the simulator to a Go + Python repo*; *a hermetic build must not mutate the checkout* |
+| Tool downloads and installation | *Security Hardening Best Practices* §4; *the skill shipped the defects it was meant to catch* |
+| Manifest, kustomize and kubeconform checks | *a rendered manifest is not a runnable container*; *kubeconform `statusError` is fail-open* |
+| Operator integration in Kind | *Operator reconcile smoke test — image clobber, silent rollout failures, and missing overlays*; *Operator-Integration in Vanilla Kind* |
+| Fault injection | *Fault injection is the only evidence a check works* |
+| Jira evidence and scope | *Find the Jira component before claiming there is no history*; *the biggest historical failure class is often the one called out of scope* |
+
+The checksum section is current: every downloaded tool is verified against its
+published digest. The older "attempted but removed" text is superseded and any
+entry that still says otherwise records a defect, not a recipe.
 
 It starts from evidence, not a checklist: before generating anything it mines
 the component's historical Jira breakages, classifies each one as catchable

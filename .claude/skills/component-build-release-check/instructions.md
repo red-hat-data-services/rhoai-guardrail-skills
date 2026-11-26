@@ -166,6 +166,7 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
         # ...
 
       summary:
+        name: Build Validation Summary
         if: always()
         needs: [check-skip, static-checks]   # every validation job
         runs-on: ubuntu-latest
@@ -823,6 +824,10 @@ name: PR Build Validation
 on:
   pull_request:
     branches: [main, v*, release-*]
+    # Without types:, a title edit or label change does not re-run the gate, so
+    # removing a skip token leaves the stale all-skipped result as the latest
+    # check run.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   workflow_dispatch:
 
 # Skip with [skip build-validation] in the PR title or the skip-build-validation
@@ -1415,17 +1420,27 @@ hermetic_go_preflight() (
 
   # Install the builder image's Go version before calling this function: read
   # the version from the golang/go-toolset FROM tag in the Dockerfile.
-  # GOTOOLCHAIN=local is explicit in BOTH phases so a go.mod that
-  # requires a newer toolchain fails here in the network phase, instead of
-  # downloading a toolchain the Konflux builder does not have and passing.
-  # Setting it explicitly also stops an inherited GOTOOLCHAIN from changing
-  # behaviour between local runs and CI.
-  GOTOOLCHAIN=local GOMODCACHE="$modcache" GOFLAGS="-mod=readonly" \
-    go mod download
+  # Warm the cache from a copy: go mod download writes missing go.sum entries
+  # into the module tree, and -mod=readonly only guards go.mod. Downloading in
+  # the live checkout lets the offline phase pass against a go.sum the
+  # preflight repaired itself, which is the incomplete-checksum defect this
+  # preflight exists to catch.
+  cp -a . "$workdir/src"
+  ( cd "$workdir/src" && GOTOOLCHAIN=local GOMODCACHE="$modcache" go mod download )
 
-  # Offline phase: GOPROXY=off turns a missing module into a hard failure
+  # Offline phase in the untouched checkout: GOPROXY=off turns a missing module
+  # or go.sum entry into a hard failure. GOTOOLCHAIN=local is explicit in BOTH
+  # phases so a go.mod that requires a newer toolchain fails here in the
+  # network phase, instead of downloading a toolchain the Konflux builder does
+  # not have and passing. Setting it explicitly also stops an inherited
+  # GOTOOLCHAIN from changing behaviour between local runs and CI.
   GOTOOLCHAIN=local GOMODCACHE="$modcache" GOPROXY=off GOFLAGS="-mod=readonly" \
     CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o "$workdir/app" .
+
+  # Fail if either phase still reached into the checkout. git status also sees
+  # a go.sum the download created from nothing.
+  mutated=$(git status --porcelain -- go.mod go.sum)
+  [ -z "$mutated" ] || { echo "❌ go.mod/go.sum mutated by preflight:"; echo "$mutated"; exit 1; }
 )
 
 hermetic_python_preflight() (
@@ -1516,6 +1531,10 @@ done
   `go-version-file: go.mod` installs whatever the module asks for, which is the
   mismatch this check exists to catch. With `GOTOOLCHAIN=local`, a `go.mod` that
   requires a newer Go fails in the network phase.
+- **Warm the cache from a copy.** `go mod download` writes missing `go.sum`
+  entries into the live checkout even with `-mod=readonly`, which repairs the
+  input the offline phase is meant to test. Download in a copy, build offline in
+  the pristine tree, and fail on any `go.mod`/`go.sum` mutation.
 - Build the same package target with the same flags as the Dockerfile (`CGO_ENABLED`, `GOOS`, `-tags`, entry package). Building a different target does not prove the shipped binary links.
 - Set `GOOS=linux` even on macOS so local runs catch platform-specific files.
 - Use `GOPROXY=off` instead of `--network=none` inside a build that must also populate its cache; the npm limitation documented in `LEARNINGS.md` applies to any package manager that resolves during the build.
@@ -1779,9 +1798,15 @@ This is **much stronger validation** than just checking YAML syntax.
       - name: Install Kind
         run: |
           set -euo pipefail
-          curl -Lo kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-          chmod +x kind
-          sudo mv kind /usr/local/bin/
+          KIND_VERSION=v0.20.0
+          KIND_URL="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}"
+          # Kind publishes a .sha256sum next to the binary; verify before
+          # installing, never curl-and-exec.
+          curl -fLo kind-linux-amd64 "${KIND_URL}/kind-linux-amd64"
+          curl -fLo kind-linux-amd64.sha256sum "${KIND_URL}/kind-linux-amd64.sha256sum"
+          sha256sum -c kind-linux-amd64.sha256sum
+          chmod +x kind-linux-amd64
+          sudo mv kind-linux-amd64 /usr/local/bin/kind
 
       - name: Create Kind cluster
         run: |
@@ -2161,7 +2186,8 @@ unrelated to the PR, and a pin lets you bump it deliberately.
   manifest-validation:
     name: Validate Manifests
     runs-on: ubuntu-latest
-    if: ${{ env.HAS_MANIFESTS == 'true' }}
+    needs: check-skip
+    if: needs.check-skip.outputs.should-skip != 'true'
 
     steps:
       - name: Checkout code
@@ -2197,7 +2223,11 @@ unrelated to the PR, and a pin lets you bump it deliberately.
             grep -q "kind: Service" $file || echo "⚠️  No Service in $file"
 
             # Check for common issues
-            grep "image: .*latest" $file && echo "⚠️  Warning: 'latest' tag found in $file"
+            # Guarded: an unguarded grep as the last statement fails the step on
+            # the first manifest that has no ':latest' tag.
+            if grep -q "image: .*latest" $file; then
+              echo "⚠️  Warning: 'latest' tag found in $file"
+            fi
           done
 ```
 
@@ -2315,10 +2345,15 @@ Both are cheap to check and neither needs a cluster.
 **Duplicate env vars** — no extra tooling beyond PyYAML:
 
 ```python
-for _, doc in yaml.safe_load_all(handle):
-    if doc.get("kind") not in {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}:
+for doc in yaml.safe_load_all(handle):
+    if not doc or doc.get("kind") not in {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}:
         continue
-    for container in doc["spec"]["template"]["spec"].get("containers", []):
+    spec = doc["spec"]
+    if doc["kind"] == "CronJob":
+        spec = spec["jobTemplate"]["spec"]["template"]["spec"]
+    else:
+        spec = spec["template"]["spec"]
+    for container in spec.get("containers", []):
         names = [e["name"] for e in container.get("env", []) if "name" in e]
         duplicates = {n for n in names if names.count(n) > 1}
 ```
@@ -2907,16 +2942,26 @@ validate_lockfiles() {
       issues=$((issues + 1))
     fi
     
-    # Check for missing resolved URLs
-    # IMPORTANT: Only check node_modules packages, not workspace packages
-    # Workspace packages (backend, frontend, packages/*) don't have resolved URLs
-    # If using jq: '.packages | to_entries[] | select(.key | startswith("node_modules/"))'
-    pkg_count=$(grep -c '"version":' "$lockfile" || true)
-    resolved_count=$(grep -c '"resolved":' "$lockfile" || true)
-    
-    if [ $pkg_count -gt 0 ] && [ $resolved_count -eq 0 ]; then
-      echo "⚠️  $lockfile is missing resolved URLs"
-      issues=$((issues + 1))
+    # Check each node_modules entry, not aggregate counts: one entry with a
+    # resolved URL hides another that has none. Workspace packages (backend,
+    # frontend, packages/*) and link: entries legitimately have no resolved
+    # URL, so only inspect versioned node_modules entries.
+    if command -v jq >/dev/null 2>&1; then
+      missing=$(jq -r '
+        .packages // {}
+        | to_entries[]
+        | select(.key | test("(^|/)node_modules/"))
+        | select(.value.version != null)
+        | select(.value.link != true)
+        | select(.value.resolved == null)
+        | .key' "$lockfile")
+      if [ -n "$missing" ]; then
+        echo "❌ $lockfile has node_modules entries without a resolved URL:"
+        echo "$missing" | head -10
+        issues=$((issues + 1))
+      fi
+    else
+      echo "⚠️  jq not installed; cannot check per-entry resolved URLs"
     fi
   done < <(find . -name "package-lock.json")
   
@@ -3321,7 +3366,16 @@ Add to `.github/pull_request_template.md`:
 #### Step 6.2: Add Status Check Requirement
 
 Suggest adding to repository settings:
-- Require "Validate Build" status check before merge
+
+- Require only `Build Validation Summary` (the `summary` job) before merge.
+  Do not require `Validate Build`: that job is *skipped* when
+  `validation-checks` does not succeed, and GitHub counts a skipped required
+  check as passing.
+
+  ```
+  Repository settings → Branches → Require status checks to pass
+  ✅ Build Validation Summary   (not "Validate Build")
+  ```
 
 ## Success Metrics
 

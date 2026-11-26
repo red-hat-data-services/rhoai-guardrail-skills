@@ -309,42 +309,44 @@ jobs:
 - manifest-validation job (all steps)
 - summary job
 
-### 4. Checksum Verification for Downloaded Binaries (Attempted but Removed)
+### 4. Checksum Verification for Downloaded Binaries
 
 **Why:** Prevents execution of tampered or corrupted binaries (supply chain security).
 
-**Status:** ⚠️ **NOT IMPLEMENTED** - Attempted but caused CI failures with checksum mismatches.
+**Status:** ✅ **REQUIRED.** The earlier "attempted but removed" guidance is
+superseded: a checksum mismatch means the download is wrong, not that the check
+should be dropped. Read the digest from the project's published checksum file
+and verify it before installation. For a tool that publishes no checksum, pin a
+digest recorded from a known-good download and commit it with the workflow.
 
-**Lessons Learned:**
-- Checksum verification is excellent security practice in theory
-- In practice, it adds complexity and potential for breakage:
-  * Checksums must be manually verified and updated
-  * GitHub Actions runners may have caching/proxy issues
-  * Difficult to debug checksum mismatches in CI
-- For this workflow, the security benefits of pinned GitHub Actions provide the primary supply chain protection
-- Binary downloads (websocat, Kind, kustomize) revert to simple curl + install
-
-**Alternative Approach (if needed in future):**
-- Use official installation scripts when available (e.g., kustomize install script)
-- Download from trusted sources (github.com releases)
-- Rely on HTTPS for transport security
-- Pin specific versions in URLs when possible
+**Rule:** Every downloaded tool is verified before it runs. Pinned GitHub
+Actions protect only the actions themselves, not binaries the workflow fetches
+with `curl`. HTTPS and a versioned URL are names, not integrity guarantees.
 
 **What was attempted:**
 - websocat v1.12.0: SHA256 verification (failed in CI)
 - Kind v0.20.0: SHA256 verification (failed in CI)
 - Kustomize v5.3.0: SHA256 verification (never enabled)
 
-**Final implementation:**
+Those attempts used a hand-maintained digest that drifted from the artifact.
+The fix is the project's published checksum file, not abandoning the control.
+Kind publishes `kind-linux-amd64.sha256sum` next to the release binary:
+
 ```yaml
-# Simple approach - works reliably
 - name: Install Kind
   run: |
     set -euo pipefail
-    curl -Lo kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-    chmod +x kind
-    sudo mv kind /usr/local/bin/
+    KIND_VERSION=v0.20.0
+    KIND_URL="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}"
+    curl -fLo kind-linux-amd64 "${KIND_URL}/kind-linux-amd64"
+    curl -fLo kind-linux-amd64.sha256sum "${KIND_URL}/kind-linux-amd64.sha256sum"
+    sha256sum -c kind-linux-amd64.sha256sum
+    chmod +x kind-linux-amd64
+    sudo mv kind-linux-amd64 /usr/local/bin/kind
 ```
+
+See *Learning: the skill shipped the defects it was meant to catch* for how the
+old guidance propagated into generated workflows.
 
 ### 5. Improved Skip Conditions
 
@@ -476,7 +478,10 @@ When generating new Konflux build simulation workflows, ensure:
 - [ ] API tests use real endpoints, not placeholders
 - [ ] Webpack chunk validation uses correct file patterns
 
-**Note:** Checksum verification for downloaded binaries was attempted but removed due to CI failures. For supply chain security, rely on pinned GitHub Actions and HTTPS downloads from trusted sources.
+**Note:** Every downloaded binary is verified against the project's published
+checksum before installation. Pinned GitHub Actions and HTTPS do not cover
+tools fetched with `curl`. See *Learning: the skill shipped the defects it was
+meant to catch*.
 
 ## Issue: Operator-Integration in Vanilla Kind — Pods Cannot Become Ready
 
@@ -1857,9 +1862,10 @@ The checks that made the closure meaningful:
 Two onboarding reviews produced the same class of finding: the simulator's own
 steps changed files the PR would commit, or that a later step reads.
 
-- **Copy the tree** before running an offline build that writes `go.sum`,
-  `yarn.lock` or a generated manifest. Overwriting the live `go.sum` lets the
-  job pass by editing its own input and leaves a dirty checkout.
+- **Copy the tree** before a dependency download that can write `go.sum`,
+  `yarn.lock` or a generated manifest, then run the offline build in the
+  pristine checkout. Overwriting the live `go.sum` lets the job pass by editing
+  its own input and leaves a dirty checkout.
 - **Give `deploy.py` a private kubeconfig** containing only the Kind context it
   created. `kind export kubeconfig` writes the user's default file, so a stale
   current-context can deploy to whatever cluster the runner had.
