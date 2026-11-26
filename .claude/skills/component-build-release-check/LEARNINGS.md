@@ -115,7 +115,10 @@ This excludes:
 
     echo "::group::Verifying all dependencies have resolved URLs"
     # Check only node_modules dependencies (skip workspace packages)
-    MISSING_RESOLVED=$(jq -r '.packages | to_entries[] | select(.key | startswith("node_modules/")) | select(.value.resolved == null or .value.resolved == "") | .key' package-lock.json || true)
+    if ! MISSING_RESOLVED=$(jq -r '.packages | to_entries[] | select(.key | startswith("node_modules/")) | select(.value.resolved == null or .value.resolved == "") | .key' package-lock.json); then
+      echo "❌ FAIL: jq could not parse package-lock.json"
+      exit 1
+    fi
     if [ -n "$MISSING_RESOLVED" ]; then
       echo "❌ FAIL: Found dependencies without resolved URLs"
       echo "$MISSING_RESOLVED"
@@ -399,8 +402,13 @@ is green without proving anything.
 
 ```yaml
 if command -v jq &> /dev/null; then
-  # jq commands with proper validation
-  MISSING=$(jq -r '.packages | ...' package-lock.json || true)
+  # jq commands with proper validation. Do not append `|| true`: a malformed
+  # lockfile makes jq exit non-zero, and suppressing that turns a parse error
+  # into an empty result that passes.
+  if ! MISSING=$(jq -r '.packages | ...' package-lock.json); then
+    echo "❌ jq could not parse package-lock.json"
+    exit 1
+  fi
   if [ -n "$MISSING" ]; then
     echo "❌ FAIL: Validation failed"
     exit 1

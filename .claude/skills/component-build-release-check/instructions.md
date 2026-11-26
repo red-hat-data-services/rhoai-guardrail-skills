@@ -413,26 +413,34 @@ for lockfile in $LOCKFILES; do
   fi
 done
 
-# Check for Go modules
+# Check for Go modules. A standard-library-only module has no checksums to
+# record, so require go.sum only when go.mod declares a dependency.
 if [ -f "go.mod" ]; then
   echo "✅ Found go.mod"
-  
-  # Verify go.sum exists
-  if [ ! -f "go.sum" ]; then
-    echo "❌ go.mod exists but go.sum is missing"
-    echo "   Required for hermetic builds"
+
+  if grep -Eq '^[[:space:]]*require([[:space:](]|$)' go.mod; then
+    if [ ! -f "go.sum" ]; then
+      echo "❌ go.mod declares dependencies but go.sum is missing"
+      echo "   Required for hermetic builds"
+    else
+      echo "✅ go.sum present"
+    fi
   else
-    echo "✅ go.sum present"
+    echo "✅ go.mod declares no dependencies; go.sum not required"
   fi
-  
+
   # Check for multiple go.mod files (monorepo BFFs)
   GO_MODS=$(find packages -name "go.mod" 2>/dev/null || true)
   for gomod in $GO_MODS; do
     gosum="${gomod%%.mod}.sum"
-    if [ ! -f "$gosum" ]; then
-      echo "❌ $gomod exists but $gosum is missing"
+    if grep -Eq '^[[:space:]]*require([[:space:](]|$)' "$gomod"; then
+      if [ ! -f "$gosum" ]; then
+        echo "❌ $gomod declares dependencies but $gosum is missing"
+      else
+        echo "✅ $gomod has corresponding go.sum"
+      fi
     else
-      echo "✅ $gomod has corresponding go.sum"
+      echo "✅ $gomod declares no dependencies; go.sum not required"
     fi
   done
 fi
@@ -984,40 +992,48 @@ jobs:
           
           # Check root go.mod
           if [ -f "go.mod" ]; then
-            if [ ! -f "go.sum" ]; then
-              echo "❌ go.mod exists but go.sum is missing"
-              ISSUES=$((ISSUES + 1))
-            else
-              echo "✅ Root go.mod/go.sum present"
-              
-              # Verify checksums if Go is available
-              if command -v go &> /dev/null; then
-                echo "Verifying Go module checksums..."
-                go mod verify || {
-                  echo "❌ go mod verify failed"
-                  ISSUES=$((ISSUES + 1))
-                }
+            if grep -Eq '^[[:space:]]*require([[:space:](]|$)' go.mod; then
+              if [ ! -f "go.sum" ]; then
+                echo "❌ go.mod declares dependencies but go.sum is missing"
+                ISSUES=$((ISSUES + 1))
+              else
+                echo "✅ Root go.mod/go.sum present"
+
+                # Verify checksums if Go is available
+                if command -v go &> /dev/null; then
+                  echo "Verifying Go module checksums..."
+                  go mod verify || {
+                    echo "❌ go mod verify failed"
+                    ISSUES=$((ISSUES + 1))
+                  }
+                fi
               fi
+            else
+              echo "✅ Root go.mod declares no dependencies; go.sum not required"
             fi
           fi
           
           # Check for BFF go.mod files in packages/*/bff
           for gomod in $(find packages -name "go.mod" 2>/dev/null || true); do
             gosum="${gomod%%.mod}.sum"
-            if [ ! -f "$gosum" ]; then
-              echo "❌ $gomod exists but $gosum is missing"
-              ISSUES=$((ISSUES + 1))
-            else
-              echo "✅ $gomod has corresponding go.sum"
-              
-              # Verify if Go is available
-              if command -v go &> /dev/null; then
-                DIR=$(dirname "$gomod")
-                (cd "$DIR" && go mod verify) || {
-                  echo "❌ go mod verify failed for $gomod"
-                  ISSUES=$((ISSUES + 1))
-                }
+            if grep -Eq '^[[:space:]]*require([[:space:](]|$)' "$gomod"; then
+              if [ ! -f "$gosum" ]; then
+                echo "❌ $gomod declares dependencies but $gosum is missing"
+                ISSUES=$((ISSUES + 1))
+              else
+                echo "✅ $gomod has corresponding go.sum"
+
+                # Verify if Go is available
+                if command -v go &> /dev/null; then
+                  DIR=$(dirname "$gomod")
+                  (cd "$DIR" && go mod verify) || {
+                    echo "❌ go mod verify failed for $gomod"
+                    ISSUES=$((ISSUES + 1))
+                  }
+                fi
               fi
+            else
+              echo "✅ $gomod declares no dependencies; go.sum not required"
             fi
           done
           
@@ -3036,14 +3052,18 @@ validate_lockfiles() {
   
   # Check Go modules
   if [ -f "go.mod" ]; then
-    if [ ! -f "go.sum" ]; then
-      echo "❌ go.mod exists but go.sum is missing"
-      issues=$((issues + 1))
-    else
-      echo "✅ Root go.mod/go.sum present"
-      if command -v go &> /dev/null; then
-        go mod verify || issues=$((issues + 1))
+    if grep -Eq '^[[:space:]]*require([[:space:](]|$)' go.mod; then
+      if [ ! -f "go.sum" ]; then
+        echo "❌ go.mod declares dependencies but go.sum is missing"
+        issues=$((issues + 1))
+      else
+        echo "✅ Root go.mod/go.sum present"
+        if command -v go &> /dev/null; then
+          go mod verify || issues=$((issues + 1))
+        fi
       fi
+    else
+      echo "✅ Root go.mod declares no dependencies; go.sum not required"
     fi
   fi
   
@@ -3051,14 +3071,18 @@ validate_lockfiles() {
   while IFS= read -r gomod; do
     [ -z "$gomod" ] && continue
     gosum="${gomod%%.mod}.sum"
-    if [ ! -f "$gosum" ]; then
-      echo "❌ $gomod exists but $gosum is missing"
-      issues=$((issues + 1))
-    else
-      echo "✅ $gomod has corresponding go.sum"
-      if command -v go &> /dev/null; then
-        (cd "$(dirname "$gomod")" && go mod verify) || issues=$((issues + 1))
+    if grep -Eq '^[[:space:]]*require([[:space:](]|$)' "$gomod"; then
+      if [ ! -f "$gosum" ]; then
+        echo "❌ $gomod declares dependencies but $gosum is missing"
+        issues=$((issues + 1))
+      else
+        echo "✅ $gomod has corresponding go.sum"
+        if command -v go &> /dev/null; then
+          (cd "$(dirname "$gomod")" && go mod verify) || issues=$((issues + 1))
+        fi
       fi
+    else
+      echo "✅ $gomod declares no dependencies; go.sum not required"
     fi
   done < <(find packages -name "go.mod" 2>/dev/null || true)
   
@@ -3239,7 +3263,7 @@ This repository uses automated PR build validation to catch build failures befor
 
 ## What's Validated
 
-- ✅ **Hermetic lockfile compatibility** (P0) - Validates package-lock.json and go.sum for downstream RHOAI builds
+- ✅ **Hermetic lockfile compatibility** (P0) - Validates package-lock.json and the go.sum of every module that declares dependencies for downstream RHOAI builds
 - ✅ **Workspace dependencies** (P0) - Ensures Dockerfiles COPY all referenced workspace packages
 - ✅ Docker build with production configuration
 - ✅ Container startup and health checks
@@ -3265,11 +3289,12 @@ This repository uses automated PR build validation to catch build failures befor
 2. Replace git+/github:/file: dependencies with npm registry versions
 3. Update package.json to use published packages instead of git references
 
-**Error:** Missing go.sum file
+**Error:** Missing go.sum file for a module that declares dependencies
 
 **Fix:**
-1. Run `go mod tidy` in the directory with go.mod
-2. Commit the generated go.sum file
+1. Confirm go.mod contains a `require` directive
+2. Run `go mod tidy` in the directory with go.mod
+3. Commit the generated go.sum file
 
 ### Workspace Dependency Validation Fails (P0)
 
@@ -3536,7 +3561,7 @@ Validation`.
 - ✅ **Hermetic lockfile validation** - Validates package-lock.json for Hermeto/Cachi2 compatibility
   - Detects unsupported dependency protocols (git+, github:, file:)
   - Ensures all dependencies have resolved URLs
-  - Verifies go.sum exists for all go.mod files
+  - Verifies go.sum exists for every go.mod that declares dependencies
   - Runs go mod verify if Go is available
 - ✅ **Workspace dependency validation** - Ensures Dockerfiles COPY all referenced packages
   - Dynamically detects workspace scope from package.json
