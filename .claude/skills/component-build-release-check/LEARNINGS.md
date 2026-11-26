@@ -315,9 +315,10 @@ jobs:
 
 **Status:** ✅ **REQUIRED.** The earlier "attempted but removed" guidance is
 superseded: a checksum mismatch means the download is wrong, not that the check
-should be dropped. Read the digest from the project's published checksum file
-and verify it before installation. For a tool that publishes no checksum, pin a
-digest recorded from a known-good download and commit it with the workflow.
+should be dropped. Record the digest from the project's published checksum file,
+pin it in the workflow, and verify the download against that value before
+installation. For a tool that publishes no checksum, pin a digest recorded from
+a known-good download and commit it with the workflow.
 
 **Rule:** Every downloaded tool is verified before it runs. Pinned GitHub
 Actions protect only the actions themselves, not binaries the workflow fetches
@@ -329,18 +330,23 @@ with `curl`. HTTPS and a versioned URL are names, not integrity guarantees.
 - Kustomize v5.3.0: SHA256 verification (never enabled)
 
 Those attempts used a hand-maintained digest that drifted from the artifact.
-The fix is the project's published checksum file, not abandoning the control.
-Kind publishes `kind-linux-amd64.sha256sum` next to the release binary:
+The fix is a digest pinned from the project's published checksum file, not
+abandoning the control.
+
+Record the digest once from Kind's published `kind-linux-amd64.sha256sum`, then
+pin it in the workflow. Do not fetch the checksum from the same release at run
+time: an attacker who replaces the binary can replace the checksum too.
 
 ```yaml
 - name: Install Kind
+  env:
+    KIND_VERSION: v0.20.0
+    KIND_SHA256: 513a7213d6d3332dd9ef27c24dab35e5ef10a04fa27274fe1c14d8a246493ded
   run: |
     set -euo pipefail
-    KIND_VERSION=v0.20.0
-    KIND_URL="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}"
-    curl -fLo kind-linux-amd64 "${KIND_URL}/kind-linux-amd64"
-    curl -fLo kind-linux-amd64.sha256sum "${KIND_URL}/kind-linux-amd64.sha256sum"
-    sha256sum -c kind-linux-amd64.sha256sum
+    url="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+    curl -fLo kind-linux-amd64 "$url"
+    printf '%s  %s\n' "$KIND_SHA256" kind-linux-amd64 | sha256sum --check --strict
     chmod +x kind-linux-amd64
     sudo mv kind-linux-amd64 /usr/local/bin/kind
 ```
@@ -350,19 +356,44 @@ old guidance propagated into generated workflows.
 
 ### 5. Improved Skip Conditions
 
-**Why:** Allows both PR title and label-based skipping for better workflow control.
+**Why:** Allows both PR title and label-based skipping without duplicating the
+condition in every job.
 
 **Pattern:**
 
+A single `check-skip` job owns the condition and publishes the result; every
+other job consumes it:
+
 ```yaml
-if: "!contains(github.event.pull_request.title, '[skip build-validation]') && !contains(github.event.pull_request.labels.*.name, 'skip-build-validation')"
+check-skip:
+  outputs:
+    should-skip: ${{ steps.decide.outputs.should-skip }}
+  steps:
+    - id: decide
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+      run: |
+        if [[ "$PR_TITLE" == *"[skip build-validation]"* ]] || \
+           [[ ",${PR_LABELS}," == *",skip-build-validation,"* ]]; then
+          echo "should-skip=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "should-skip=false" >> "$GITHUB_OUTPUT"
+        fi
+
+validation-checks:
+  needs: check-skip
+  if: needs.check-skip.outputs.should-skip != 'true'
 ```
 
-**Applied to all main jobs**
+**Applied to all main jobs** through that gate, with `edited`, `labeled` and
+`unlabeled` in `pull_request.types` so removing a skip token re-runs it.
 
 ### 6. Optional Tool Dependencies with Fallback
 
-**Why:** Makes workflows more resilient to environment differences, provides clear warnings.
+**Why:** A fallback is only appropriate when the tool adds convenience, not when
+it implements a validator. A missing validator must fail closed, or the result
+is green without proving anything.
 
 **Pattern:**
 
@@ -375,12 +406,13 @@ if command -v jq &> /dev/null; then
     exit 1
   fi
 else
-  echo "⚠️  WARNING: jq not installed, skipping detailed validation"
+  echo "❌ jq is required for the lockfile check"
+  exit 1
 fi
 ```
 
 **Applied to:**
-- jq dependency in hermetic-preflight job
+- jq dependency in hermetic-preflight and lockfile validation
 - Workspace validation checks
 
 ### 7. Proper Timeout Handling and Readiness Probes
@@ -471,17 +503,17 @@ When generating new Konflux build simulation workflows, ensure:
 - [ ] Least-privilege permissions defined for each job
 - [ ] `set -euo pipefail` in all bash scripts
 - [ ] Skip conditions check both PR title and labels
-- [ ] Optional tools have fallback messages
+- [ ] Optional tools have a fallback; required validators fail closed when missing
 - [ ] Readiness probes with proper timeouts
 - [ ] All variables quoted in bash scripts
 - [ ] Error messages provide context and debugging info
 - [ ] API tests use real endpoints, not placeholders
 - [ ] Webpack chunk validation uses correct file patterns
 
-**Note:** Every downloaded binary is verified against the project's published
-checksum before installation. Pinned GitHub Actions and HTTPS do not cover
-tools fetched with `curl`. See *Learning: the skill shipped the defects it was
-meant to catch*.
+**Note:** Every downloaded binary is verified against a digest pinned from the
+project's published checksum before installation. Pinned GitHub Actions and
+HTTPS do not cover tools fetched with `curl`. See *Learning: the skill shipped
+the defects it was meant to catch*.
 
 ## Issue: Operator-Integration in Vanilla Kind — Pods Cannot Become Ready
 
@@ -749,8 +781,10 @@ and Python, split the work into two phases on the host:
 2. Offline phase: `GOPROXY=off ... go build`, or
    `pip install --dry-run --no-index --find-links <wheelhouse>`.
 
-The offline phase is the actual hermetic proof: a dependency that Hermeto would
-not prefetch fails immediately instead of in Konflux.
+The offline phase is the actual hermetic proof: a dependency missing from the
+warmed cache fails immediately instead of in Konflux. It proves the cache, not
+that Hermeto's `prefetch-input` contains every dependency; warm the cache from
+those inputs first.
 
 ### 2. Go module cache files are read-only
 
@@ -1716,8 +1750,8 @@ Two more findings from the same job:
   any offline install.
 - **`--no-deps` proves nothing about the closure.** Install the runtime set into
   a fresh venv and run `uv pip check`. That is the command that fails when a
-  transitive dependency is missing from the prefetch — the failure the hermetic
-  build reports after merge.
+  transitive dependency is missing from the wheelhouse — the failure the
+  hermetic build reports after merge.
 - **One requirement file can redirect another.** `konflux-aipcc-requirements.txt`
   starts with `--index-url https://console.redhat.com/...`. Handing that file
   and the PyPI pins to a single resolver points *both* at the Red Hat index, and

@@ -53,17 +53,29 @@ Generate GitHub Actions workflows and supporting files for PR build validation.
 
 5. **Improved Skip Conditions**
    ```yaml
-   if: "!contains(github.event.pull_request.title, '[skip build-validation]') && !contains(github.event.pull_request.labels.*.name, 'skip-build-validation')"
+   check-skip:
+     outputs:
+       should-skip: ${{ steps.decide.outputs.should-skip }}
+
+   validation-checks:
+     needs: check-skip
+     if: needs.check-skip.outputs.should-skip != 'true'
    ```
+   Compute the title/label condition once in `check-skip`; do not repeat the
+   `contains(...)` expression in every job. Rule 10 has the complete gate.
 
 6. **Optional Tool Dependencies with Fallback**
    ```bash
    if command -v jq &> /dev/null; then
      # ... jq commands
    else
-     echo "⚠️  WARNING: jq not installed, skipping validation"
+     echo "❌ jq is required for this validation"
+     exit 1
    fi
    ```
+   A fallback is for a tool whose absence removes a convenience. A missing
+   validator fails closed: a warning that skips the check is a green result
+   that proved nothing.
 
 7. **Proper Timeout Handling**
    ```bash
@@ -946,7 +958,8 @@ jobs:
                 ISSUES=$((ISSUES + 1))
               fi
             else
-              echo "⚠️  WARNING: jq not installed, skipping per-entry resolved-URL check"
+              echo "❌ jq is required for per-entry resolved-URL validation"
+              exit 1
             fi
           done
           
@@ -1395,11 +1408,49 @@ jobs:
 
           echo "=== Docker Inspect ==="
           docker inspect test-container || true
+
+  summary:
+    name: Build Validation Summary
+    if: always()
+    needs: [check-skip, validation-checks, build-validation]   # every validation job
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS"
+          # check-skip must itself succeed, or the gate told us nothing.
+          gate=$(jq -r '."check-skip".result' <<< "$NEEDS")
+          if [ "$gate" != "success" ]; then
+            echo "❌ check-skip result was '$gate'"
+            exit 1
+          fi
+          skip=$(jq -r '."check-skip".outputs."should-skip"' <<< "$NEEDS")
+          if [ "$skip" = "true" ]; then
+            # Off by request. 'skipped' is the only acceptable result.
+            bad=$(jq -r 'to_entries[]
+              | select(.key != "check-skip" and .key != "summary")
+              | select(.value.result != "skipped")
+              | "\(.key)=\(.value.result)"' <<< "$NEEDS")
+          else
+            # Not skipped, so 'skipped' is a failure here.
+            bad=$(jq -r 'to_entries[]
+              | select(.key != "check-skip" and .key != "summary")
+              | select(.value.result != "success")
+              | "\(.key)=\(.value.result)"' <<< "$NEEDS")
+          fi
+          if [ -n "$bad" ]; then
+            echo "❌ unexpected job results:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "✅ all validation jobs accounted for (skip=$skip)"
 ```
 
 #### Step 2.1b: Hermetic Preflight for Go and Python Repositories
 
-Node repos use the two-stage pnpm store pattern above. Go and Python need the same shape of proof: populate a cache with network access, then build or resolve with the network disabled by configuration. That catches the failure Hermeto exposes — a dependency that was never prefetched.
+Node repos use the two-stage pnpm store pattern above. Go and Python need the same shape of proof: populate a cache with network access, then build or resolve with the network disabled by configuration. That catches a dependency the build cannot resolve before the PR reaches Konflux. The offline phase proves the warmed cache; it proves `prefetch-input` coverage only after the cache is warmed from those inputs (Step 1.5b).
 
 Both functions open with `(` rather than `{`. A `trap ... EXIT` registered
 inside a function body belongs to the *shell*, not to the function: when the
@@ -1456,14 +1507,17 @@ hermetic_python_preflight() (
   # macosx_arm64 says nothing about the manylinux build Konflux runs.
   local python_platform="${PYTHON_PLATFORM:-x86_64-manylinux_2_34}"
 
-  # --no-config ignores uv.toml and [tool.uv] in the checkout; the unset covers
-  # the other half, inherited UV_* settings that would swap the index, add
-  # constraints or change wheel selection. Without both, the preflight can
-  # resolve a different graph from the one the job declares and still pass.
-  # UV_CACHE_DIR is set deliberately below and is not cleared here.
-  unset UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_DEFAULT_INDEX \
-    UV_CONSTRAINT UV_OVERRIDE UV_RESOLUTION UV_PRERELEASE UV_FIND_LINKS \
-    UV_NO_BINARY UV_BINARY
+  # --no-config ignores uv.toml and [tool.uv] in the checkout. Inherited UV_*
+  # settings are the other half: they swap the index, add constraints, exclude
+  # newer releases or change wheel selection, so the preflight can resolve a
+  # different graph from the one the job declares and still pass. Clear every
+  # inherited UV_* variable rather than an allowlist that drifts as uv adds
+  # settings; UV_CACHE_DIR is set deliberately below.
+  while IFS='=' read -r uv_var _; do
+    case "$uv_var" in
+      UV_*) unset "$uv_var" ;;
+    esac
+  done < <(env)
 
   # Network phase 1: resolve the full closure. Use uv, not pip. pip's
   # backtracking gives up on real dependency graphs ("resolution-too-deep")
@@ -1496,7 +1550,8 @@ hermetic_python_preflight() (
     --python-platform "$python_platform" \
     --requirement "$requirements_file" --quiet
 
-  # Offline phase: --offline forbids all network, so a missing prefetch fails here
+  # Offline phase: --offline forbids all network, so a dependency missing from
+  # the warmed cache fails here
   rm -rf "$workdir/v1"
   uv venv "$workdir/v2" --python "$python_version" --quiet
   uv pip install --offline --python "$workdir/v2/bin/python" \
@@ -1540,7 +1595,7 @@ done
 - Use `GOPROXY=off` instead of `--network=none` inside a build that must also populate its cache; the npm limitation documented in `LEARNINGS.md` applies to any package manager that resolves during the build.
 - **Use `uv` for the Python preflight, not `pip`.** `pip download` / `pip install --no-index` is the obvious recipe and it does not survive contact with a real dependency graph: pip aborts with `resolution-too-deep`, and its sdist fallback needs system toolchains the runner lacks. If the image already installs with `uv`, resolve with `uv` too — otherwise the preflight is validating a different resolution than the one that ships.
 - Pin `--python-version` and `--python-platform` to the Konflux build target (`x86_64-manylinux_2_34` for a linux/x86_64 pipeline). Resolving on the runner platform proves nothing about the build.
-- Warm an isolated `UV_CACHE_DIR` and **delete the venv** before the `--offline` install. If the venv survives, the second install can satisfy itself from installed packages and the check passes without proving the prefetch is sufficient.
+- Warm an isolated `UV_CACHE_DIR` and **delete the venv** before the `--offline` install. If the venv survives, the second install can satisfy itself from installed packages and the check passes without proving the warmed cache is sufficient.
 - Run the Python resolution in a venv: PEP 668 externally-managed environments (Homebrew, Debian) reject `pip install --dry-run`.
 - Keep this in a separate fast preflight job and make image builds depend on it.
 
@@ -1785,26 +1840,28 @@ This is **much stronger validation** than just checking YAML syntax.
 ```yaml
   operator-integration:
     name: "Operator Integration (Kind)"
-    needs: [docker-build-odh, docker-build-rhoai]  # Or whatever your build jobs are named
+    needs: [check-skip, docker-build-odh, docker-build-rhoai]  # Or whatever your build jobs are named
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    if: "!contains(github.event.pull_request.title, '[skip build-validation]') && !contains(github.event.pull_request.labels.*.name, 'skip-build-validation')"
+    if: needs.check-skip.outputs.should-skip != 'true'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
 
       - name: Install Kind
+        env:
+          KIND_VERSION: v0.20.0
+          # Digest from the published kind-linux-amd64.sha256sum for this
+          # version. Pin it here: a checksum fetched from the same release can
+          # be replaced together with the binary.
+          KIND_SHA256: 513a7213d6d3332dd9ef27c24dab35e5ef10a04fa27274fe1c14d8a246493ded
         run: |
           set -euo pipefail
-          KIND_VERSION=v0.20.0
-          KIND_URL="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}"
-          # Kind publishes a .sha256sum next to the binary; verify before
-          # installing, never curl-and-exec.
-          curl -fLo kind-linux-amd64 "${KIND_URL}/kind-linux-amd64"
-          curl -fLo kind-linux-amd64.sha256sum "${KIND_URL}/kind-linux-amd64.sha256sum"
-          sha256sum -c kind-linux-amd64.sha256sum
+          url="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          curl -fLo kind-linux-amd64 "$url"
+          printf '%s  %s\n' "$KIND_SHA256" kind-linux-amd64 | sha256sum --check --strict
           chmod +x kind-linux-amd64
           sudo mv kind-linux-amd64 /usr/local/bin/kind
 
@@ -2345,6 +2402,7 @@ Both are cheap to check and neither needs a cluster.
 **Duplicate env vars** — no extra tooling beyond PyYAML:
 
 ```python
+issues = 0
 for doc in yaml.safe_load_all(handle):
     if not doc or doc.get("kind") not in {"Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"}:
         continue
@@ -2356,6 +2414,16 @@ for doc in yaml.safe_load_all(handle):
     for container in spec.get("containers", []):
         names = [e["name"] for e in container.get("env", []) if "name" in e]
         duplicates = {n for n in names if names.count(n) > 1}
+        if duplicates:
+            workload = doc.get("metadata", {}).get("name", "<unnamed>")
+            print(
+                f"❌ {doc['kind']}/{workload} container "
+                f"{container.get('name', '<unnamed>')}: duplicate env {sorted(duplicates)}"
+            )
+            issues += 1
+
+if issues:
+    raise SystemExit(1)
 ```
 
 **Flag contract** — build the operator image, read its flag set, compare:
@@ -2961,7 +3029,8 @@ validate_lockfiles() {
         issues=$((issues + 1))
       fi
     else
-      echo "⚠️  jq not installed; cannot check per-entry resolved URLs"
+      echo "❌ jq is required for per-entry resolved-URL validation"
+      issues=$((issues + 1))
     fi
   done < <(find . -name "package-lock.json")
   
