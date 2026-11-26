@@ -11,6 +11,9 @@ covcounters*
 .idea/
 .cursor/
 
+# Local Claude Code skill links (skills live in .agents/skills/)
+.claude/skills/
+
 # OS
 .DS_Store
 *~
