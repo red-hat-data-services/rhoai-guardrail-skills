@@ -17,7 +17,7 @@ Every generated check is fault-injected against the component's real Jira
 failure history, and the PR description lists both what the check now catches
 and what it cannot.
 
-Example invocation in Claude Code:
+After linking, invoke the skill in Claude Code:
 
 ```bash
 /component-build-release-check https://github.com/org/repo
@@ -53,6 +53,22 @@ cert-manager controller from Helm.
 
 Generation only: the skill writes scripts and never runs them or contacts a
 cluster.
+
+## Using with Claude Code
+
+Claude Code only discovers project skills under `.claude/skills/`. Link the
+skills in this checkout before invoking them:
+
+```bash
+mkdir -p .claude/skills
+for skill in .agents/skills/*/; do
+  name="$(basename "$skill")"
+  ln -sfn "../../.agents/skills/$name" ".claude/skills/$name"
+done
+```
+
+The links are local-only and ignored by Git; `.agents/skills/` remains the
+source of truth.
 
 ## Linting
 
