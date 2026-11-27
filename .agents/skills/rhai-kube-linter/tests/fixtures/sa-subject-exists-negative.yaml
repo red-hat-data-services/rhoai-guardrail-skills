@@ -1,0 +1,44 @@
+# sa-subject-exists negative controls: must stay SILENT (0 findings).
+# 1) RoleBinding in team-a with namespace-less subject "worker"; SA worker
+#    exists in team-a (the subject resolves to the binding's namespace).
+# 2) RoleBinding in team-a with subject "other" explicitly in team-c; SA
+#    other exists in team-c.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: worker
+  namespace: team-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rb-same-ns
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: some-role
+subjects:
+- kind: ServiceAccount
+  name: worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: other
+  namespace: team-c
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rb-explicit-ns
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: some-role
+subjects:
+- kind: ServiceAccount
+  name: other
+  namespace: team-c

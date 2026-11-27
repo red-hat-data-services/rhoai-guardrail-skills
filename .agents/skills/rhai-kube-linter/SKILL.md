@@ -46,18 +46,16 @@ If asked to do any of these, decline and record it as a proposed next step.
    actual manifest locations (see
    [recipes/module-operator.md](recipes/module-operator.md)).
 2. **Load recipes** per the routing table — only what the content justifies.
-3. **Render and inspect.** Render every selected profile with the pinned
-   external renderer into one scratch multi-document file per profile;
-   inspect the rendered resources before adapting checks.
+3. **Render and inspect** each profile per its format recipe.
 4. **Propose checks and assess failures.** Build the check-selection
    matrix from the inspected renders and observed diagnostics — never
    from source YAML alone; classify findings from the final lint.
-5. **Report** from [templates/report.md](templates/report.md).
+5. **Summarize the assessment** using the [assessment checklist](#assessment-checklist).
 6. **Approval gate.** Present the proposed file set/diff; write nothing to the
    consumer repository until approved (the disclosed renderer-owned
    chart-cache write excepted under Hard limits).
-7. **Onboard.** Apply the approved config, script, Makefile amendment, and
-   workflow, specialized from actual repository facts.
+7. **Onboard** the approved config, lint script, and
+   Makefile/workflow using actual repository facts.
 8. **Rerun** the canonical entry point CI will use; confirm the result matches
    the assessment.
 
@@ -105,21 +103,16 @@ scope is assessed.
 - **Record the module pin in every report.** A source-built binary
   self-reports version `development` — the pin is the evidence, not the
   version output.
-- **The linter runs on the host.** Read-only-ness is procedural: write
-  reports only to the designated report directory, never to consumer paths.
-  Only the `schema-validation` check (when enabled) downloads schemas at
-  runtime.
+- Keep raw renders/reports in fresh private scratch outside the consumer tree.
+  See the [entry-point recipe](recipes/entry-point.md) for scratch cleanup
+  and tool prerequisites. Only `schema-validation`
+  downloads schemas.
 - **Run invocations from bash files, never zsh one-liners.** zsh applies
   history modifiers inside double quotes (its `:r` once rewrote `$var:ro`
   to `…varo`), masquerading as tool bugs.
-- **External rendering is required for every Helm chart and Kustomize
-  root** — never pass a chart directory or root directly to kube-linter.
-  Each profile renders into one scratch multi-document file, linted only
-  after the render succeeds. Pinned render commands, remote-input
-  fetching, provenance digests, and chart-inflation Helm provisioning
-  live in the format recipes; the scaffolded entry point (scripts,
-  Makefile, workflow, templates) in
-  [recipes/entry-point.md](recipes/entry-point.md).
+- Render Helm charts and Kustomize roots externally; never lint them directly.
+  Pins, provenance, and caller-owned Helm are in the format recipes; onboarding
+  is in [recipes/entry-point.md](recipes/entry-point.md).
 
 ## Check-selection policy
 
@@ -151,9 +144,9 @@ scope is assessed.
 
 ## Failure semantics
 
-Local and CI runs share success/nonzero semantics: the must-fail list,
-success traps, and flags live in
-[recipes/entry-point.md](recipes/entry-point.md) and the format recipes.
+`KUBE_LINTER_FAIL_ON_FINDINGS` defaults to `true`; `false` downgrades only
+selected-check findings. Invalid values and operational/mixed results fail.
+See [recipes/entry-point.md](recipes/entry-point.md).
 
 ## Evidence discipline
 
@@ -168,9 +161,14 @@ success traps, and flags live in
   template comments (`dangling-servicemonitor` validates selectors,
   not endpoint ports). Renderer-behavior claims get the same
   treatment: minimal repro, pinned render, compare output.
-- Evaluate JSON reports together with exit status and stderr (report
-  fields and classification vocabulary:
-  [templates/report.md](templates/report.md)).
+- `tests/custom-checks.sh` runs the fixture controls in `tests/fixtures/`
+  for the custom CEL checks — the template by default, or any config
+  adapted from it as an argument. Verify adaptations this way:
+  hand-copied CEL expressions are where typos slip in (one adaptation
+  compared a RoleBinding's namespace with itself and silenced the
+  cross-namespace control).
+- Evaluate structured results together with exit status and stderr. Count
+  finding entries and use object metadata for attribution.
 - A NetworkPolicy selects pods by pod-template labels — a Deployment's
   own metadata labels are insufficient evidence (controller/operand
   distinction guidance: the module-operator recipe).
@@ -184,23 +182,19 @@ success traps, and flags live in
 - Per profile: never concatenate alternative overlays or charts into a fake
   deployment context to silence cross-resource checks.
 
-## Report
+## Assessment checklist
 
-Produce the report from [templates/report.md](templates/report.md), which
-defines the required sections, finding classifications, and evidence
-handling.
+Summarize in the conversation and write a file only when requested.
 
-## Output and maintenance
+- **Scope.** Role, profiles, rendering inputs and provenance, exact pinned commands.
+- **Check selection.** Decisions and manifest evidence.
+- **Findings.** Profile, check, resource, evidence, and classification
+  (observed issue, expected requirement, rendering/tool limit, or unresolved).
+- **Outcome.** Findings policy, stage exit statuses, and coverage gaps.
+- **Proposals.** Narrow exceptions with rationale, onboarding diff, and canonical command.
 
-**Evaluation records are opt-in.** Deliver assessment results in the
-conversation, structured per the report template — never write
-evaluation records to the filesystem unless the user explicitly asks,
-and then where they direct.
+## Maintenance
 
-**Raw evidence is private scratch** — confidentiality rules in
-[templates/report.md](templates/report.md).
-
-Re-verify check names, flags, and rendering behavior against the pinned
-releases when changing any pin, and record the change with rationale
-(pins live in the lint scripts —
-[recipes/entry-point.md](recipes/entry-point.md)).
+The script prints diagnostics and the workflow uploads SARIF. When changing
+a pin, verify affected checks, flags, and rendering, then record the reason.
+See the [entry-point recipe](recipes/entry-point.md).

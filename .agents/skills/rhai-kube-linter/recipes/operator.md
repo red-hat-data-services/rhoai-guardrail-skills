@@ -115,6 +115,6 @@ validation they mispredicted two of the checks below.
 ## Handoff
 
 Map observations to check decisions, narrow exception proposals, and concise
-evidence per the report template. Route onboarding through the shared
-entry-point contract. Do not audit Go source to explain RBAC; the manifests
-and documentation are the evidence base.
+evidence using the [assessment checklist](../SKILL.md#assessment-checklist).
+Use the shared entry-point contract for onboarding and base RBAC findings on
+manifests and documentation.

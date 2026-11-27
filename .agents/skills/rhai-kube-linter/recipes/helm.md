@@ -84,8 +84,9 @@ GOFLAGS= GOWORK=off go run helm.sh/helm/v4/cmd/helm@v4.3.2 template \
 ```
 
 - Helm 4 is required even when the consumer uses Helm 3 — document
-  compatibility differences, never silently downgrade. The module needs
-  Go 1.26; the pinned invocation is the evidence of what rendered.
+  compatibility differences, never silently downgrade. The Helm 4 module
+  needs Go >= 1.26. See the entry-point recipe for consumer prerequisites.
+  The pinned invocation is the evidence of what rendered.
 - External rendering runs in **normal mode**: `required`/`fail` template
   errors abort the render (verified: nonzero exit, error naming the
   template and value, zero bytes of output). A failed render blocks the
@@ -171,10 +172,6 @@ conclusion stays **unknown**.
 
 ## Handoff
 
-Classify findings per the report template (observed issue / expected
-requirement / rendering-tool limitation / unresolved), keep the
-source/profile/values mapping, and route onboarding through the shared
-entry-point contract — `scripts/lint-helm.sh` renders each chart with
-the pinned Helm 4 (including chart CRDs via `--include-crds`) and lints
-the rendered file; there is no CI-specific
-Helm path and no native chart target.
+Use the [assessment checklist](../SKILL.md#assessment-checklist) and retain
+the mapping between chart, profile, and values. The shared entry point uses
+pinned Helm 4 with `--include-crds` and lints the rendered file.

@@ -59,5 +59,5 @@ evidence; propose narrow exceptions only with justification:
 ## Handoff
 
 Map every observation to a check decision or exception scope with concise
-manifest evidence, classify findings per the report template, and route
-onboarding through the shared entry-point contract.
+manifest evidence. Use the [assessment checklist](../SKILL.md#assessment-checklist)
+to classify findings and the shared entry-point contract for onboarding.

@@ -1,79 +1,73 @@
 # Onboarding entry-point recipe
 
-**Load this recipe when** proposing onboarding files (SKILL.md workflow
-step 6): the shared lint entry point, its scripts, and the Makefile /
-workflow integration. It applies to every repository regardless of format
-or repository role, alongside the format and repository recipes.
+**Load this recipe when** proposing the lint script, Makefile target, and
+GitHub Actions workflow in the onboarding file set.
 
-## Lint scripts
+## Lint script
 
-- **Two renderer scripts, scaffolded per repository need:**
-  `scripts/lint-helm.sh` (Helm charts) and `scripts/lint-kustomize.sh`
-  (Kustomize roots). Scaffold only the ones the repository uses — a
-  Helm-only repository gets only `lint-helm.sh`. Plain-YAML targets
-  without a renderer are not scaffolded.
-- **Each lint script owns the pin, config path, lint targets, rendering
-  details, and lint flags for its renderer; workflows must not duplicate
-  them.**
-- **Lint scripts are Bash 3.2 compatible** — indexed arrays and functions,
-  no associative arrays or namerefs; validate specialization with an
-  actual Bash 3.2 interpreter, not only the default `bash` on PATH.
-- Reuse an existing equivalent entry point unchanged when it meets the
-  canonical command contract (SKILL.md), documenting its exact command.
-  If an existing script does not conform, propose adaptations for
-  approval — never silently replace it or add a duplicate wrapper.
+Copy the [lint template](../templates/lint-manifests.sh.tmpl) to
+`scripts/lint-manifests.sh`. Specialize the config path, kube-linter module
+pin, and renderer calls. Reuse an existing equivalent entry point when it
+meets the canonical command contract.
+
+Replace `__PLACEHOLDER_RENDER_PROFILES__` with one `lint_profile` call per
+deployment context. Each call takes a unique profile name, a repository-relative
+entry-point file, the pinned renderer module, and its argument list. The entry
+must be a file committed to the repository — the combined SARIF report
+attributes every finding of the profile to it, because the renders are
+disposable scratch outside the checkout and Code Scanning can neither display
+nor fingerprint locations that reference them. The
+script runs from the consumer repository root. Use the documented Helm
+release, namespace, values, and overrides, preserving argument boundaries
+and order. Include only calls for the consumer's selected targets.
+
+```bash
+lint_profile chart charts/app/Chart.yaml \
+  helm.sh/helm/v4/cmd/helm@v4.3.2 template app charts/app \
+  --namespace app --include-crds -f 'values production.yaml'
+
+lint_profile overlay overlays/production/kustomization.yaml \
+  sigs.k8s.io/kustomize/kustomize/v5@v5.8.1 build --enable-helm overlays/production
+```
+
+The script uses Bash 3.2 or later, jq, and a Go version compatible with the
+selected module pins. Helm 4 requires Go 1.26 or later. Kustomize uses Helm
+from the caller's PATH when a root inflates charts. See the format recipes
+for rendering and provenance.
 
 ## Failure semantics
 
-Local and CI runs share success/nonzero semantics; the scripts must fail
-on selected-check violations, rendering failures, invalid or unparseable
-resources, empty targets, zero enabled checks, malformed or missing
-reports, and tool invocation failures.
+`KUBE_LINTER_FAIL_ON_FINDINGS` controls findings in both local and CI runs.
 
-**Success traps** (verified against the pinned releases):
+| Value | Selected-check findings only | Operational error or mixed result |
+|---|---|---|
+| unset or `true` | fail | fail |
+| `false` | warn and succeed | fail |
+| empty or any other value | configuration error | configuration error |
 
-- A config with **zero enabled checks can exit successfully before
-  rendering anything** — treat "no checks enabled" as a failure.
-- Empty input can pass silently without `--fail-if-no-objects-found`.
-- v0.8.3 invalid-resource handling uses the deprecated
-  `--fail-on-invalid-resource` flag; verify flags against the pinned
-  release, not default-branch docs.
-- When aggregating profiles, run every independent profile even if an
-  earlier one fails; keep later diagnostics and combine failures. An
-  early abort that drops later evidence is a defect.
-- Reset and check stale render/report artifacts before each profile; a
-  failed or partial render is never linted.
-- Helm render-failure semantics (normal-mode `required`/`fail` aborts,
-  unselected install/upgrade branches) and Kustomize render-failure
-  semantics live in the format recipes.
+A profile must render successfully before linting. The script runs
+kube-linter once per profile and prints its plain-text output. It checks
+the SARIF, exit status, and tool diagnostics before applying the findings
+policy. Independent profiles run even after a failure. Rendered manifests
+stay in disposable scratch.
 
-## Makefile and CI integration
+## Makefile and CI
 
-- **Makefile present:** local instructions and GitHub Actions both call
-  its lint target (default `lint-manifests`), whose recipe lists only the
-  lint scripts the repository needs, each invoked through `bash` (the
-  scaffolded scripts are committed non-executable). Statuses aggregate
-  across scripts — every listed script runs even if an earlier one fails,
-  and the target fails if any script failed — matching the profile
-  aggregation rule above. The workflow must never bypass it with a direct
-  script call or a direct `go run` invocation. An absent Go toolchain is
-  a missing prerequisite, not permission to bypass.
-- **No Makefile:** local users and Actions invoke the same
-  repository-local lint scripts through `bash`, keeping only the lines
-  the repository needs and aggregating statuses the same way. Do not
-  create a Makefile just for this skill.
-
-## Maintenance
-
-Re-verify check names, flags, and rendering behavior against the pinned
-releases (kube-linter, Helm, Kustomize) when changing any pin in a lint
-script, and record pin changes with rationale.
-
-## Templates
-
-Onboarding templates — specialize from actual repository facts before use:
-[../templates/lint-helm.sh.tmpl](../templates/lint-helm.sh.tmpl),
-[../templates/lint-kustomize.sh.tmpl](../templates/lint-kustomize.sh.tmpl),
-[../templates/Makefile.tmpl](../templates/Makefile.tmpl),
-[../templates/github-actions-make.yml.tmpl](../templates/github-actions-make.yml.tmpl),
-[../templates/github-actions-script.yml.tmpl](../templates/github-actions-script.yml.tmpl).
+- If a Makefile exists, reuse its manifest lint target when it meets the
+  canonical command contract above. Propose adapting an incompatible target
+  in the onboarding diff. If the Makefile has no manifest lint target, append
+  the [Makefile target](../templates/Makefile.tmpl). The workflow and local
+  users call the same target.
+- Otherwise use `bash ./scripts/lint-manifests.sh` directly in both places.
+- In the [workflow template](../templates/github-actions.yml.tmpl), fill
+  in the default branch, Go version, and canonical lint command. Use the
+  SARIF upload step on GitHub Code Scanning-enabled repositories.
+- GitHub Actions uploads the complete SARIF report after the lint step,
+  including when strict findings fail it. Each profile has its own
+  category, and every result's location is the profile's entry-point file
+  (one committed path per profile — an approximation, since a render
+  combines several source files). Each result also carries a partial
+  fingerprint — written to `partialFingerprints.primaryLocationLineHash`,
+  the only key Code Scanning consumes — built from its rule ID and object
+  identity, so two objects failing the same check in one profile do not
+  merge into a single alert.

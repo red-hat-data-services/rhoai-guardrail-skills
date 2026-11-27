@@ -127,7 +127,6 @@ containment comparison is yours, and it is static:
 ## Handoff
 
 Record the three workload classes, the containment comparison (or its missing
-evidence), per-check classifications, and narrow exception proposals per the
-report template. Route onboarding through the shared entry-point contract. No
-history investigation, source debugging, or manifest edits — static manifest
-evidence only.
+evidence), per-check classifications, and narrow exception proposals using the
+[assessment checklist](../SKILL.md#assessment-checklist). Use static manifest
+evidence and route onboarding through the shared entry-point contract.

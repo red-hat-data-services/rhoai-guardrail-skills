@@ -1,0 +1,23 @@
+# sa-subject-exists positive control: must FIRE (1 finding).
+# RoleBinding in team-a with a namespace-less subject "worker"; the only
+# "worker" ServiceAccount in the corpus lives in team-b, so the subject
+# resolves to team-a/worker, which nothing creates.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: worker
+  namespace: team-b
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rb-cross-ns
+  namespace: team-a
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: some-role
+subjects:
+- kind: ServiceAccount
+  name: worker

@@ -97,36 +97,33 @@ GOFLAGS= GOWORK=off go run golang.stackrox.io/kube-linter/cmd/kube-linter@v0.8.3
   the report's provenance. The pinned invocation is the evidence of what
   rendered.
 - `GOFLAGS=`/`GOWORK=off` keep the version-qualified `go run` standalone,
-  insulated from the consumer's Go configuration. The linter runs on the
-  host — keep report outputs in the designated scratch directory and never
-  write to consumer paths (the renderer's chart-pull cache is the sole
-  exception; see the `--enable-helm` bullet). Pin by module version, never
-  an unpinned module.
-- **`--enable-helm` is passed on every render.** A root whose kustomization
-  declares `helmCharts` fails the build without it (`must specify
-  --enable-helm`); roots without chart generators are unaffected. Chart
-  inflation shells out to `helm` from PATH (verified against the pinned
-  v5.8.1: it execs `helm version --short` as a gate and accepts Helm 4.3.2).
-  Chart reach is not locally enumerable — a chart can arrive through a
-  local base outside any scanned directory, a remote base, or a
-  component — so the lint script installs the pinned Helm binary (the
-  same module pin chart rendering uses, via `go install` into scratch)
-  and prepends it to PATH on every run: inflation always runs the
-  recorded version, never a host helm, and a chart-free repository pays
-  one unused binary in scratch. Provisioning requires the Go toolchain
-  (Go >= 1.26 for the Helm 4 pin) and downloads the module on first use
-  (network access to the module proxy). Record the resolved version in
-  the report. Remote chart repositories are
-  fetched by that path: record them in the report's provenance like any
-  remote input. The pull writes the chart into the
-  root's chart home (`helmGlobals.chartHome` if set, else `<root>/charts/`)
+  insulated from the consumer's Go configuration. The renderer/linter run on
+  the host — keep private raw renders/reports in fresh temporary scratch
+  outside the consumer tree and never write other report data to consumer
+  paths (the renderer's chart-pull cache is the sole exception; see the
+  `--enable-helm` bullet). Pin by module version, never an unpinned module.
+- **Pass `--enable-helm` on every render.** A root whose kustomization
+  declares `helmCharts` needs it; roots without chart generators are
+  unaffected. When chart inflation is needed, pinned Kustomize executes
+  `helm` from the caller's `PATH`. The caller owns installing/provisioning
+  that executable and choosing its version. The lint script does not install
+  or pin Helm, enforce a host version, or rewrite `PATH`; chart-free roots
+  need no Helm executable. A missing or incompatible caller-provided Helm is
+  a render failure, never a reason to fall back or silently install another
+  version. Record the actual caller Helm version/provenance when known;
+  report it as unknown rather than inventing it when unavailable.
+- Chart reach is not locally enumerable — a chart can arrive through a
+  local base outside any scanned directory, a remote base, or a component.
+  Remote chart repositories are fetched by Kustomize; record the actual
+  remote inputs in the report's provenance. The pull writes the chart into
+  the root's chart home (`helmGlobals.chartHome` if set, else `<root>/charts/`)
   — the one renderer-owned write into the consumer tree. It cannot be
-  redirected (kustomize rejects a chart home outside the root), it happens
+  redirected (Kustomize rejects a chart home outside the root), it can happen
   even when the render subsequently fails, and it is not cleaned up (a
-  pulled chart is indistinguishable from a checked-in one). Disclose the
-  write before rendering such a root (Hard limits), report it in the
-  provenance, and propose gitignoring the chart home or vendoring the
-  chart during onboarding.
+  pulled chart is indistinguishable from a checked-in one). Disclose the write
+  before rendering such a root (Hard limits) and report it with the actual
+  chart/input provenance. During onboarding, the team may choose to ignore
+  the chart home or vendor the chart; do not make that change yourself.
 - **Remote inputs are fetched by the renderer.** Remote references (URLs,
   `http(s)://`) are fetched by the pinned Kustomize exactly as the
   consumer's kustomization specifies. Record remote references in the
@@ -150,9 +147,11 @@ Rules for explicit rendering:
 - **Alternative overlays stay isolated.** Render and lint each overlay
   separately; never concatenate overlays into one file to silence
   cross-resource diagnostics.
-- A failed `kustomize build` is a non-success outcome; preserve stderr and
-  do not fall back to raw-directory linting of the same root. Empty or
-  comment-only renders are failures too, not passes.
+- Lint rendered YAML after a successful `kustomize build` that produced
+  resources. For assessment, capture raw stderr in private scratch and
+  summarize failures in the report. The generated lint script prints
+  renderer diagnostics locally and in CI and fails the profile on a render
+  failure or empty output.
 
 ## Step 3 — Assess per profile
 
@@ -194,8 +193,6 @@ Rules for explicit rendering:
 
 ## Handoff
 
-Classify findings per the report template, keep the root/overlay-to-render
-mapping, and route onboarding through the shared entry-point contract:
-`scripts/lint-kustomize.sh` renders every root with the pinned Kustomize
-and lints the rendered file — there is no native directory target and no
-CI-specific path.
+Use the [assessment checklist](../SKILL.md#assessment-checklist) and retain
+the mapping between each root or overlay and its render. The shared entry
+point runs pinned Kustomize and lints the rendered file.
